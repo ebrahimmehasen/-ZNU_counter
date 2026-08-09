@@ -177,9 +177,17 @@ to `[2, 3]` — then cleaned the test rows back out.
 
 ## 7. Deployed on Vercel
 
-**Live production URL: https://vercel-app-pi-weld.vercel.app**
-- Display: https://vercel-app-pi-weld.vercel.app/
-- Call: https://vercel-app-pi-weld.vercel.app/call
+**Live production URL: https://znu-counter-voice.vercel.app**
+- Display: https://znu-counter-voice.vercel.app/
+- Call: https://znu-counter-voice.vercel.app/call
+
+This is the project's **stable alias** (visible as "Latest Production
+URL" via `vercel project ls`) — it always points at whatever was most
+recently deployed to production. Earlier docs/messages in this project
+referenced `vercel-app-pi-weld.vercel.app`, which was actually a
+one-off *deployment* URL (each individual deploy gets a unique random
+one) that stops resolving once superseded — a mistake, not a second
+real domain. Always use the stable alias above.
 
 Deployed via the Vercel CLI (`npx vercel login` → device-flow browser
 authorization → `npx vercel` → set `NEXT_PUBLIC_SUPABASE_URL` /
@@ -187,21 +195,20 @@ authorization → `npx vercel` → set `NEXT_PUBLIC_SUPABASE_URL` /
 add` → `npx vercel --prod` to rebuild with them). Project:
 `ebrahim8/vercel-app` in your Vercel account.
 
-Verified against the live deployment itself (not just localhost):
-inserted a real ticket via SQL, watched it appear on the deployed `/`
-within ~1s via Realtime, called it from the deployed `/call`, watched
-`/` update to "NOW SERVING 1 · COUNTER 1" — then cleaned the test row
-back out.
+**Now connected to GitHub** (`ebrahimmehasen/-ZNU_counter`, via `vercel
+git connect`) with **Root Directory** set to `vercel-app` (since the
+Next.js app is a subfolder of the repo, not the repo root — set via
+`vercel project update vercel-app --root-directory vercel-app`).
+Pushing to `main` now triggers an automatic production deploy — no
+need to run `vercel --prod` by hand for ordinary code changes anymore;
+it's still there as a manual fallback.
 
-To redeploy after future code changes:
-```bash
-cd vercel-app
-npx vercel --prod
-```
-Environment variables persist across deploys — no need to re-add them
-unless they change. Point the waiting-room screen and whoever calls
-numbers at the URL above (or attach a custom domain in the Vercel
-dashboard).
+Verified against the live deployment itself (not just localhost):
+inserted real tickets via SQL, watched them appear on the deployed `/`
+within ~1s via Realtime, called two from two simulated counters at
+once, watched the "last 5 called" stack update in the correct order —
+then cleaned the test rows back out via the `admin_reset_business_date`
+RPC (far more reliable than the SQL Editor UI for scripted cleanup).
 
 ## 8. Testing checklist
 
