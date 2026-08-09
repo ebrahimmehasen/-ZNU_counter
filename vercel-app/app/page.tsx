@@ -13,30 +13,34 @@ import {
   unlockSpeech,
 } from "@/lib/speech";
 
-type Current = { ticket_number: number; counter_number: number } | null;
+type CalledTicket = { ticket_number: number; counter_number: number; called_at: string };
 
 type DisplayData = {
-  current: Current;
+  // Last 5 called tickets, most recent first — not just the single
+  // latest one. If counter 3 calls #45 and counter 5 calls #46 a
+  // moment later, #45's "go to counter 3" must stay on screen, not
+  // vanish the instant a different counter calls someone else.
+  recentlyCalled: CalledTicket[];
   nextNumbers: number[];
   stats: { totalToday: number; waiting: number; called: number };
 };
 
 const EMPTY: DisplayData = {
-  current: null,
+  recentlyCalled: [],
   nextNumbers: [],
   stats: { totalToday: 0, waiting: 0, called: 0 },
 };
 
 async function fetchDisplayData(businessDate: string): Promise<DisplayData> {
-  const [{ data: currentRows }, { data: waitingRows }, { count: totalToday }, { count: waiting }, { count: called }] =
+  const [{ data: calledRows }, { data: waitingRows }, { count: totalToday }, { count: waiting }, { count: called }] =
     await Promise.all([
       supabase
         .from("tickets")
-        .select("ticket_number, counter_number")
+        .select("ticket_number, counter_number, called_at")
         .eq("business_date", businessDate)
         .eq("status", "CALLED")
         .order("called_at", { ascending: false })
-        .limit(1),
+        .limit(5),
       supabase
         .from("tickets")
         .select("ticket_number")
@@ -64,7 +68,7 @@ async function fetchDisplayData(businessDate: string): Promise<DisplayData> {
     ]);
 
   return {
-    current: (currentRows && currentRows[0]) || null,
+    recentlyCalled: calledRows || [],
     nextNumbers: (waitingRows || []).map((r) => r.ticket_number),
     stats: {
       totalToday: totalToday ?? 0,
@@ -90,7 +94,9 @@ export default function DisplayPage() {
   const [businessDate, setBusinessDate] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoiceURI, setSelectedVoiceURIState] = useState("");
-  const lastCalled = useRef<number | null>(null);
+  // Newest `called_at` already shown/announced. null = nothing seen
+  // yet (first load — must not replay history as new announcements).
+  const lastCalledAt = useRef<string | null>(null);
 
   useEffect(() => {
     setBusinessDate(todayBusinessDate());
@@ -117,15 +123,26 @@ export default function DisplayPage() {
     if (!businessDate) return;
     try {
       const next = await fetchDisplayData(businessDate);
-      const changed = lastCalled.current !== null && next.current?.ticket_number !== lastCalled.current;
-      if (changed) {
+
+      // Anything called after the newest called_at we've already
+      // handled is new. There can be more than one (two counters
+      // calling within the same poll/Realtime tick) — announce all of
+      // them, oldest first, so they play back in the order they
+      // actually happened rather than overlapping or skipping ahead.
+      const newCalls = lastCalledAt.current
+        ? next.recentlyCalled.filter((c) => c.called_at > lastCalledAt.current!)
+        : [];
+      if (lastCalledAt.current !== null && newCalls.length > 0) {
         setFlash(true);
         setTimeout(() => setFlash(false), 1200);
-        if (next.current) {
-          announceTicket(next.current.ticket_number, next.current.counter_number);
-        }
+        [...newCalls]
+          .sort((a, b) => a.called_at.localeCompare(b.called_at))
+          .forEach((c) => announceTicket(c.ticket_number, c.counter_number));
       }
-      lastCalled.current = next.current?.ticket_number ?? null;
+      if (next.recentlyCalled.length > 0) {
+        lastCalledAt.current = next.recentlyCalled[0].called_at; // [0] is the newest (query orders desc)
+      }
+
       setData(next);
       setOffline(false);
     } catch {
@@ -171,19 +188,32 @@ export default function DisplayPage() {
 
       <main className="w-full max-w-5xl flex flex-col items-center gap-8">
         <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-6">
-          <section className="bg-slate-900 border-2 border-blue-900 rounded-3xl px-8 py-10 text-center flex flex-col items-center justify-center">
-            <div className="text-blue-300 tracking-widest text-sm sm:text-lg font-bold">يتم خدمته الآن</div>
-            <div
-              className={`font-extrabold leading-none my-3 text-[90px] sm:text-[150px] transition-colors duration-700 ${
-                flash ? "text-green-400" : "text-white"
-              }`}
-            >
-              {data.current ? data.current.ticket_number : "—"}
+          <section className="bg-slate-900 border-2 border-blue-900 rounded-3xl px-6 py-6 flex flex-col gap-3">
+            <div className="text-blue-300 tracking-widest text-sm sm:text-lg font-bold text-center">
+              يتم خدمته الآن
             </div>
-            {data.current && (
-              <div className="text-2xl sm:text-3xl font-bold text-blue-300">
-                مكتب رقم {data.current.counter_number}
+            {data.recentlyCalled.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center text-slate-600 font-extrabold text-[90px] py-10">
+                —
               </div>
+            ) : (
+              data.recentlyCalled.map((c, i) => (
+                <div
+                  key={c.called_at}
+                  className={`flex items-center justify-between rounded-2xl px-6 transition-colors duration-700 ${
+                    i === 0
+                      ? `py-5 ${flash ? "bg-green-900/60" : "bg-blue-950/60"} border border-blue-800`
+                      : "py-3 bg-slate-800/60"
+                  }`}
+                >
+                  <span className={`font-extrabold ${i === 0 ? "text-[64px] sm:text-[80px]" : "text-3xl sm:text-4xl text-slate-300"}`}>
+                    {c.ticket_number}
+                  </span>
+                  <span className={`font-bold ${i === 0 ? "text-2xl sm:text-3xl text-blue-300" : "text-lg sm:text-xl text-blue-400"}`}>
+                    مكتب رقم {c.counter_number}
+                  </span>
+                </div>
+              ))
             )}
           </section>
 

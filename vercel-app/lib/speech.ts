@@ -130,15 +130,35 @@ async function speak(text: string) {
   await playChime();
 }
 
+// If two counters call "next" around the same moment, both announcements
+// must still play — one after the other, in the order they were called,
+// never overlapping/cutting each other off. A simple FIFO queue plus a
+// single drain loop gives that for free, regardless of how many calls
+// land in the same polling/Realtime tick.
+const announceQueue: string[] = [];
+let draining = false;
+
+async function drainQueue() {
+  if (draining) return;
+  draining = true;
+  while (announceQueue.length > 0) {
+    const text = announceQueue.shift()!;
+    await speak(text);
+  }
+  draining = false;
+}
+
 export function announceTicket(ticketNumber: number, counterNumber: number) {
-  void speak(`الرقم ${ticketNumber}، يرجى التوجه إلى مكتب رقم ${counterNumber} في قاعة المراجعة`);
+  announceQueue.push(`الرقم ${ticketNumber}، يرجى التوجه إلى مكتب رقم ${counterNumber} في قاعة المراجعة`);
+  void drainQueue();
 }
 
 /** Plays a sample announcement so staff can confirm audio works —
  * and compare how a given voice sounds — without waiting for a real
  * ticket to be called. */
 export function announceTest() {
-  void speak("تجربة النداء الصوتي، النظام جاهز");
+  announceQueue.push("تجربة النداء الصوتي، النظام جاهز");
+  void drainQueue();
 }
 
 export function speechAvailable(): boolean {
