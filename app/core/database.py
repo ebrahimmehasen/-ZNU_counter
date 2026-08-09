@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS tickets (
 CREATE INDEX IF NOT EXISTS idx_tickets_sync_status ON tickets(sync_status);
 CREATE INDEX IF NOT EXISTS idx_tickets_session ON tickets(session_id);
 
+CREATE TABLE IF NOT EXISTS counters (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    counter_number INTEGER NOT NULL UNIQUE,
+    name           TEXT,
+    active         INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ticket_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_id  INTEGER NOT NULL REFERENCES tickets(id),
@@ -88,7 +96,19 @@ class Database:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._ensure_device_id()
+
+    def _migrate(self) -> None:
+        """Additive, idempotent column migrations for databases created by
+        an earlier version of the schema (e.g. Phase 1 installs upgrading
+        to Phase 2's queue-calling columns). Only ADD COLUMN — never drops
+        or renames anything, so old data is never at risk."""
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(tickets)")}
+        if "counter_id" not in existing:
+            self._conn.execute("ALTER TABLE tickets ADD COLUMN counter_id INTEGER REFERENCES counters(id)")
+        if "called_at" not in existing:
+            self._conn.execute("ALTER TABLE tickets ADD COLUMN called_at TEXT")
 
     def _ensure_device_id(self) -> None:
         row = self._conn.execute(

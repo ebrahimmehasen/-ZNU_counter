@@ -65,6 +65,16 @@ class SupabaseConfig:
 
 
 @dataclass
+class WebConfig:
+    # 0.0.0.0 so other devices on the local university network (the
+    # public display screen, a tablet used to call numbers) can reach
+    # it at http://<this-pc-ip>:<port> — not just localhost.
+    host: str = "0.0.0.0"
+    port: int = 8000
+    next_numbers_count: int = 5
+
+
+@dataclass
 class AppConfig:
     printer: PrinterConfig = field(default_factory=PrinterConfig)
     template: TemplateConfig = field(default_factory=TemplateConfig)
@@ -72,6 +82,7 @@ class AppConfig:
     sync: SyncConfig = field(default_factory=SyncConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
+    web: WebConfig = field(default_factory=WebConfig)
 
     def resolve_path(self, relative: str) -> Path:
         p = Path(relative)
@@ -98,6 +109,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         database=DatabaseConfig(**raw.get("database", {})),
         sync=SyncConfig(**raw.get("sync", {})),
         logging=LoggingConfig(**raw.get("logging", {})),
+        web=WebConfig(**raw.get("web", {})),
     )
     cfg.supabase = SupabaseConfig(
         url=os.environ.get("SUPABASE_URL", ""),

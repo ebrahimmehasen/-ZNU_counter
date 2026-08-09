@@ -7,9 +7,19 @@ are still PENDING_SYNC/SYNC_FAILED and upserts them one at a time,
 marking each SYNCED as it succeeds. A failed batch simply leaves the
 remaining tickets PENDING_SYNC/SYNC_FAILED for the next tick — nothing
 about a failed sync ever touches the printing/numbering tables.
+
+The wait between ticks is a `threading.Event` rather than a plain
+sleep, so `trigger()` can wake it immediately after a successful print
+instead of waiting up to `interval_seconds`. This matters once the
+public display/call pages read from Supabase directly (Phase 2's
+Vercel deployment): a newly printed ticket should show up as "waiting"
+there within about a second, not lag by the full poll interval.
+`trigger()` only sets a flag — it's safe to call from the UI thread
+and never blocks on the network itself.
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from PySide6.QtCore import QThread, Signal
@@ -43,24 +53,25 @@ class SyncManager(QThread):
         self._stop_requested = False
         self._last_sync = None
         self._last_error = None
+        self._wake_event = threading.Event()
 
     def stop(self) -> None:
         self._stop_requested = True
+        self._wake_event.set()
+
+    def trigger(self) -> None:
+        """Wake the sync loop immediately instead of waiting for the next
+        timer tick. Safe to call from the UI thread — just sets a flag,
+        the actual network call still happens on this background thread."""
+        self._wake_event.set()
 
     def run(self) -> None:
         logger.info("Sync manager started (interval=%ss)", self.interval_seconds)
         while not self._stop_requested:
             self._sync_once()
-            for _ in range(self.interval_seconds * 10):
-                if self._stop_requested:
-                    break
-                time.sleep(0.1)
+            self._wake_event.wait(timeout=self.interval_seconds)
+            self._wake_event.clear()
         logger.info("Sync manager stopped")
-
-    def sync_now(self) -> None:
-        """Trigger an out-of-band sync attempt (e.g. right after printing)
-        without waiting for the next timer tick."""
-        self._sync_once()
 
     def _sync_once(self) -> None:
         pending = self.ticket_service.get_pending_sync_tickets(self.batch_size)

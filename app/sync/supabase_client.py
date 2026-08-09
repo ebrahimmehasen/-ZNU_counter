@@ -50,3 +50,39 @@ class SupabaseSyncClient:
             client.table("tickets").upsert(payload, on_conflict="uuid").execute()
         except Exception as e:
             raise SupabaseUnavailable(str(e)) from e
+
+    def get_max_ticket_number(self, business_date: str) -> Optional[int]:
+        """Highest ticket_number Supabase has for this business date, or
+        None if it has none / is unreachable. Used at startup to catch
+        the local sequence up if it was ever reset while the cloud
+        mirror already had newer tickets (see `reconcile_sequence_floor`
+        in ticket_service.py) — never required for printing to work,
+        only for choosing a better starting number when possible."""
+        client = self._get_client()
+        try:
+            res = (
+                client.table("tickets")
+                .select("ticket_number")
+                .eq("business_date", business_date)
+                .order("ticket_number", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            raise SupabaseUnavailable(str(e)) from e
+        return res.data[0]["ticket_number"] if res.data else None
+
+    def admin_reset_business_date(self, business_date: str, password: str) -> None:
+        """Wipes every cloud ticket for a business date via the
+        password-gated `admin_reset_business_date` RPC (see
+        supabase/schema.sql) — the password check happens server-side,
+        not just in this client, since the anon key is also embedded
+        in the public web app."""
+        client = self._get_client()
+        try:
+            client.rpc(
+                "admin_reset_business_date",
+                {"p_business_date": business_date, "p_password": password},
+            ).execute()
+        except Exception as e:
+            raise SupabaseUnavailable(str(e)) from e

@@ -1,11 +1,14 @@
 # University Admission Queue & Ticket Management System — Phase 1
 
-**Phase 1 only: the Windows desktop ticket printing application.**
-Phases 2–6 (public display, voice announcements, employee/organizer
-dashboards, full applicant workflow) are documented in the original
-project brief but are **not implemented** in this repo yet — they will
+**This document covers Phase 1: the Windows desktop ticket printing
+application.** Phase 2 (public queue display + call-next) is
+implemented, deployed on Vercel/Supabase — see
+[PHASE2_WEB.md](PHASE2_WEB.md) (a local-network fallback version also
+exists, see [PHASE2.md](PHASE2.md)). Phases 3–6 (voice announcements,
+employee/organizer dashboards, full applicant workflow) are documented
+in the original project brief but **not implemented** yet — they'll
 build on top of the SQLite schema and Supabase mirror created here
-without needing Phase 1 to be rewritten.
+without needing earlier phases to be rewritten.
 
 ---
 

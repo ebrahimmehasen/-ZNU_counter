@@ -172,3 +172,49 @@ def test_many_sequential_tickets_in_one_day(tmp_path):
     stats = tickets.get_today_stats(session.id)
     assert stats["today_count"] == 150
     assert stats["next_number"] == 151
+
+
+def test_reconcile_sequence_floor_raises_local_ceiling(tmp_path):
+    db, sessions, tickets = make_services(tmp_path)
+    session = sessions.get_or_create_today()
+
+    t1 = tickets.reserve_next_ticket(session.id)
+    tickets.mark_printed(t1.id, "PrinterA")  # local max is 1
+
+    marker = tickets.reconcile_sequence_floor(session.id, 5, "cloud already had #5")
+    assert marker.ticket_number == 5
+    assert marker.status == TicketStatus.CANCELLED
+
+    nxt = tickets.reserve_next_ticket(session.id)
+    assert nxt.ticket_number == 6
+
+
+def test_reconcile_sequence_floor_is_noop_when_local_already_ahead(tmp_path):
+    db, sessions, tickets = make_services(tmp_path)
+    session = sessions.get_or_create_today()
+
+    for _ in range(3):
+        t = tickets.reserve_next_ticket(session.id)
+        tickets.mark_printed(t.id, "PrinterA")
+
+    result = tickets.reconcile_sequence_floor(session.id, 2, "cloud only had #2")
+    assert result is None
+
+    nxt = tickets.reserve_next_ticket(session.id)
+    assert nxt.ticket_number == 4  # unaffected
+
+
+def test_reset_session_clears_tickets_and_restarts_numbering(tmp_path):
+    db, sessions, tickets = make_services(tmp_path)
+    session = sessions.get_or_create_today()
+
+    for _ in range(3):
+        t = tickets.reserve_next_ticket(session.id)
+        tickets.mark_printed(t.id, "PrinterA")
+
+    removed = tickets.reset_session(session.id)
+    assert removed == 3
+
+    nxt = tickets.reserve_next_ticket(session.id)
+    assert nxt.ticket_number == 1
+    assert tickets.get_today_stats(session.id)["today_count"] == 0

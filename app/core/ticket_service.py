@@ -135,17 +135,76 @@ class TicketService:
         row = self.db.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
         return Ticket.from_row(row) if row else None
 
+    def reconcile_sequence_floor(self, session_id: int, min_ticket_number: int, reason: str) -> Optional[Ticket]:
+        """If the cloud mirror already has a higher ticket_number for
+        today than this local database does (e.g. the local queue.db
+        was lost/reset while Supabase still had newer synced tickets),
+        insert a single CANCELLED marker row at `min_ticket_number` so
+        the next `reserve_next_ticket` continues from there instead of
+        colliding with — or silently reusing — numbers the cloud
+        already has on record. A no-op if local is already caught up.
+        Never touches printing; only ever raises the numbering floor,
+        the same way an employee-cancelled number does."""
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row["m"] >= min_ticket_number:
+                return None
+
+            now = _now()
+            ticket_uuid = str(uuid.uuid4())
+            cur = conn.execute(
+                """INSERT INTO tickets
+                   (uuid, session_id, ticket_number, status, print_attempts,
+                    sync_status, device_id, error_message, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
+                (
+                    ticket_uuid,
+                    session_id,
+                    min_ticket_number,
+                    TicketStatus.CANCELLED,
+                    SyncStatus.SYNCED,  # mirrors data the server already has; nothing new to push
+                    self.db.device_id,
+                    reason,
+                    now,
+                    now,
+                ),
+            )
+            ticket_id = cur.lastrowid
+            self._log_event(conn, ticket_id, "SEQUENCE_RECONCILED", now, {"min_ticket_number": min_ticket_number})
+            row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+        return Ticket.from_row(row)
+
+    def reset_session(self, session_id: int) -> int:
+        """Deletes every local ticket (and its events) for this
+        session, so the next reservation starts back at #1. Used only
+        by the PIN-gated admin reset — never called automatically.
+        Returns the number of tickets removed."""
+        with self.db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM ticket_events WHERE ticket_id IN (SELECT id FROM tickets WHERE session_id=?)",
+                (session_id,),
+            )
+            cur = conn.execute("DELETE FROM tickets WHERE session_id=?", (session_id,))
+            return cur.rowcount
+
     # ---- status / stats for the UI -------------------------------------
 
     def get_today_stats(self, session_id: int) -> dict:
+        # "printed today" means successfully printed at any point, regardless
+        # of whether it has since been called (PRINTED or CALLED) — a ticket
+        # moving through the public-queue lifecycle must not disappear from
+        # the printer app's own counters.
         last_printed = self.db.execute(
-            """SELECT * FROM tickets WHERE session_id=? AND status=?
+            """SELECT * FROM tickets WHERE session_id=? AND status IN (?, ?)
                ORDER BY ticket_number DESC LIMIT 1""",
-            (session_id, TicketStatus.PRINTED),
+            (session_id, TicketStatus.PRINTED, TicketStatus.CALLED),
         ).fetchone()
         count_row = self.db.execute(
-            "SELECT COUNT(*) AS c FROM tickets WHERE session_id=? AND status=?",
-            (session_id, TicketStatus.PRINTED),
+            "SELECT COUNT(*) AS c FROM tickets WHERE session_id=? AND status IN (?, ?)",
+            (session_id, TicketStatus.PRINTED, TicketStatus.CALLED),
         ).fetchone()
         max_row = self.db.execute(
             "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
@@ -168,9 +227,15 @@ class TicketService:
     def get_pending_sync_tickets(self, limit: int = 25) -> list[Ticket]:
         rows = self.db.execute(
             """SELECT * FROM tickets
-               WHERE sync_status IN (?, ?) AND status=?
+               WHERE sync_status IN (?, ?) AND status IN (?, ?)
                ORDER BY ticket_number ASC LIMIT ?""",
-            (SyncStatus.PENDING_SYNC, SyncStatus.SYNC_FAILED, TicketStatus.PRINTED, limit),
+            (
+                SyncStatus.PENDING_SYNC,
+                SyncStatus.SYNC_FAILED,
+                TicketStatus.PRINTED,
+                TicketStatus.CALLED,
+                limit,
+            ),
         ).fetchall()
         return [Ticket.from_row(r) for r in rows]
 

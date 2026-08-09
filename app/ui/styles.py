@@ -9,6 +9,29 @@ QWidget {
     color: #1f2937;
 }
 
+QPushButton#testModeButton {
+    font-size: 15px;
+    font-weight: 700;
+    color: #b45309;
+    background-color: #fef3c7;
+    border: 1px solid #f59e0b;
+    border-radius: 8px;
+    padding: 12px;
+}
+QPushButton#testModeButton:hover { background-color: #fde68a; }
+QPushButton#testModeButton:disabled { color: #a3a3a3; background-color: #f1f1f1; border-color: #d4d4d4; }
+
+QPushButton#resetButton {
+    font-size: 12px;
+    font-weight: 700;
+    color: #b91c1c;
+    background-color: transparent;
+    border: 1px solid #fca5a5;
+    border-radius: 8px;
+    padding: 8px;
+}
+QPushButton#resetButton:hover { background-color: #fee2e2; }
+
 QLabel#title {
     font-size: 26px;
     font-weight: 700;

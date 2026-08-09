@@ -29,3 +29,11 @@ sync:
 logging:
   dir: "data/logs"
   level: "INFO"
+
+web:
+  # Bind address for the Phase 2 public-display/call server
+  # (python -m app.web.server). 0.0.0.0 makes it reachable from other
+  # devices on the local network at http://<this-pc-ip>:<port>.
+  host: "0.0.0.0"
+  port: 8000
+  next_numbers_count: 5
