@@ -16,12 +16,27 @@ The number is right-aligned within its box — flush-ish against the
 right edge (near the "رقم:" label) but with a small gap so digits
 don't touch the colon — and vertically centered, using English digits
 in a bold sans-serif close to the template's font.
+
+The print date/time line ("التاريخ و الوقت: ...") used to be baked
+statically into the template image and has since been removed from
+it, so it's drawn the same way as the ticket number: fresh onto the
+copy at print time, using the actual moment of printing rather than a
+fixed value. Unlike the ticket number (plain digits, no shaping
+needed), this line is real Arabic text mixed with LTR digits, so it
+must be run through arabic_reshaper (joins letters into their
+correct positional forms) and python-bidi's get_display (produces
+the correct visual left-to-right pixel order for the mixed-direction
+line) before handing it to PIL — drawing the raw string directly
+would render disconnected, wrong-shaped Arabic letters.
 """
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from pathlib import Path
 
+import arabic_reshaper
+from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont
 
 # Box measured directly on templates/ticket_template_highres.png
@@ -35,6 +50,19 @@ FONT_CANDIDATES = (
     r"C:\Windows\Fonts\calibrib.ttf",  # Calibri Bold — closest widely-installed match to the template's Aptos
     r"C:\Windows\Fonts\arialbd.ttf",
 )
+
+# Center point + font size measured off the original template (before
+# the static date/time line was removed from it), so the redrawn line
+# lands exactly where it used to be printed.
+DATETIME_CENTER = (1889, 4158)  # x, y — horizontal center is the page's own center
+DATETIME_FONT_SIZE = 115
+
+
+def _format_datetime_line(moment: datetime) -> str:
+    period = "م" if moment.hour >= 12 else "ص"
+    hour12 = moment.strftime("%I:%M")
+    date_part = moment.strftime("%Y/%m/%d")
+    return f"التاريخ و الوقت: {date_part} {hour12} {period}"
 
 
 class TicketImageError(Exception):
@@ -56,6 +84,8 @@ def render_ticket_image(
     box: tuple[int, int, int, int] = NUMBER_BOX,
     font_size: int = FONT_SIZE,
     right_gap: int = RIGHT_GAP,
+    datetime_center: tuple[int, int] = DATETIME_CENTER,
+    datetime_font_size: int = DATETIME_FONT_SIZE,
 ) -> Path:
     template_image_path = Path(template_image_path)
     if not template_image_path.exists():
@@ -79,6 +109,11 @@ def render_ticket_image(
     y = top + (bottom - top - text_h) // 2 - bbox[1]    # vertically centered in the box
 
     draw.text((x, y), text, font=font, fill=(0, 0, 0))
+
+    datetime_line = _format_datetime_line(datetime.now())
+    datetime_display = get_display(arabic_reshaper.reshape(datetime_line))
+    datetime_font = _load_font(datetime_font_size)
+    draw.text(datetime_center, datetime_display, font=datetime_font, fill=(0, 0, 0), anchor="mm")
 
     out_path = output_dir / f"ticket_{text}_{uuid.uuid4().hex[:8]}.png"
     im.save(out_path)

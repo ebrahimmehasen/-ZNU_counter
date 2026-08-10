@@ -48,7 +48,7 @@ async function fetchDisplayData(businessDate: string): Promise<DisplayData> {
         .eq("status", "PRINTED")
         .is("called_at", null)
         .order("ticket_number", { ascending: true })
-        .limit(5),
+        .limit(6),
       supabase
         .from("tickets")
         .select("uuid", { count: "exact", head: true })
@@ -217,19 +217,24 @@ export default function DisplayPage() {
             )}
           </section>
 
-          <section className="bg-slate-900 border-2 border-slate-800 rounded-3xl px-8 py-10 text-center flex flex-col items-center justify-center">
-            <div className="text-slate-400 tracking-widest text-sm sm:text-lg font-bold mb-4">الانتظار</div>
-            <div className="flex flex-wrap justify-center gap-3">
-              {data.nextNumbers.length === 0 ? (
-                <span className="text-slate-500">لا يوجد أحد في الانتظار</span>
-              ) : (
-                data.nextNumbers.map((n) => (
-                  <span key={n} className="bg-slate-800 rounded-xl px-5 py-3 text-2xl sm:text-3xl font-bold">
+          <section className="bg-slate-900 border-2 border-slate-800 rounded-3xl px-6 py-6 flex flex-col gap-3">
+            <div className="text-slate-400 tracking-widest text-sm sm:text-lg font-bold text-center">الانتظار</div>
+            {data.nextNumbers.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center text-slate-500 py-10">
+                لا يوجد أحد في الانتظار
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 content-start">
+                {data.nextNumbers.map((n) => (
+                  <div
+                    key={n}
+                    className="bg-slate-800 rounded-xl py-4 text-2xl sm:text-3xl font-bold text-center"
+                  >
                     {n}
-                  </span>
-                ))
-              )}
-            </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </div>
 
