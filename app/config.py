@@ -83,6 +83,9 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    # Where this config was loaded from — save_config() writes back here.
+    # Not read from the YAML file itself.
+    config_path: Path = field(default=None)
 
     def resolve_path(self, relative: str) -> Path:
         p = Path(relative)
@@ -115,4 +118,32 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         url=os.environ.get("SUPABASE_URL", ""),
         key=os.environ.get("SUPABASE_KEY", ""),
     )
+    cfg.config_path = config_path
     return cfg
+
+
+def save_config(cfg: AppConfig) -> None:
+    """Persists the (non-secret) settings back to config.yaml — used by
+    the printer picker in the UI so a chosen printer survives restarts
+    instead of reverting to whatever Windows currently calls the
+    default printer. Secrets (Supabase URL/key) are never written here;
+    they stay in .env."""
+    path = cfg.config_path or (PROJECT_ROOT / "config" / "config.yaml")
+    data = {
+        "printer": {"name": cfg.printer.name, "copies": cfg.printer.copies},
+        "template": {"path": cfg.template.path, "number_padding": cfg.template.number_padding},
+        "database": {"path": cfg.database.path},
+        "sync": {
+            "enabled": cfg.sync.enabled,
+            "interval_seconds": cfg.sync.interval_seconds,
+            "batch_size": cfg.sync.batch_size,
+        },
+        "logging": {"dir": cfg.logging.dir, "level": cfg.logging.level},
+        "web": {
+            "host": cfg.web.host,
+            "port": cfg.web.port,
+            "next_numbers_count": cfg.web.next_numbers_count,
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)

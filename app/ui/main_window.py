@@ -14,6 +14,7 @@ from datetime import date
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import AppConfig
+from app.config import AppConfig, save_config
 from app.core.database import Database
 from app.core.models import TicketStatus
 from app.core.session_service import SessionService
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
         self._date_check_timer.timeout.connect(self._check_day_rollover)
         self._date_check_timer.start(30_000)
 
+        self._populate_printer_combo()
         self._refresh_all()
 
         # Deferred so the window shows up first — this makes one
@@ -215,8 +217,28 @@ class MainWindow(QMainWindow):
         # Printer + sync status row
         status_card = self._card()
         sc_layout = QVBoxLayout(status_card)
-        self.printer_name_label = QLabel()
-        sc_layout.addWidget(self.printer_name_label)
+
+        printer_row = QHBoxLayout()
+        printer_label = QLabel("الطابعة:")
+        printer_row.addWidget(printer_label)
+        # Explicit pick, persisted to config.yaml — Windows silently
+        # reassigning its own "default printer" (e.g. to Microsoft
+        # Print to PDF when the real printer is unplugged) must not
+        # change what this app prints to. Selecting an entry here is
+        # a deliberate override that survives restarts and outlives
+        # the printer being unplugged/replugged.
+        self.printer_combo = QComboBox()
+        self.printer_combo.setObjectName("printerCombo")
+        self.printer_combo.currentIndexChanged.connect(self._on_printer_selected)
+        printer_row.addWidget(self.printer_combo, 1)
+        self.printer_refresh_button = QPushButton("⟳")
+        self.printer_refresh_button.setObjectName("printerRefreshButton")
+        self.printer_refresh_button.setFixedWidth(36)
+        self.printer_refresh_button.setToolTip("تحديث قائمة الطابعات")
+        self.printer_refresh_button.clicked.connect(self._on_printer_refresh_clicked)
+        printer_row.addWidget(self.printer_refresh_button)
+        sc_layout.addLayout(printer_row)
+
         self.printer_status_label = QLabel()
         sc_layout.addWidget(self.printer_status_label)
         self.sync_status_label = QLabel("المزامنة: —")
@@ -325,8 +347,6 @@ class MainWindow(QMainWindow):
             str(stats["current_number"]) if stats["current_number"] else "—"
         )
 
-        printer_name = self.config.printer.name or (printer_service.get_default_printer() or "")
-        self.printer_name_label.setText(f"الطابعة: {printer_name or 'غير محددة'}")
         available = printer_service.printer_is_available(self.config.printer.name)
         if available:
             self.printer_status_label.setText("حالة الطابعة: جاهزة")
@@ -368,6 +388,42 @@ class MainWindow(QMainWindow):
             self.session = self.session_service.get_or_create_today()
             logger.info("New business day started: %s", self.session.business_date)
             self._refresh_all()
+
+    def _populate_printer_combo(self, keep_selection: bool = False) -> None:
+        """(Re)lists the printers Windows currently reports and re-selects
+        whichever one is configured. `keep_selection` is used by the
+        manual refresh button: if the previously-selected printer is
+        gone from the new list (unplugged), it falls back to the
+        configured name once that printer reappears rather than
+        silently switching to something else."""
+        target = self.config.printer.name
+        printers = printer_service.list_printers()
+
+        self.printer_combo.blockSignals(True)
+        self.printer_combo.clear()
+        self.printer_combo.addItem("(افتراضي Windows)", "")
+        for name in printers:
+            self.printer_combo.addItem(name, name)
+        idx = self.printer_combo.findData(target)
+        self.printer_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.printer_combo.blockSignals(False)
+
+    def _on_printer_refresh_clicked(self) -> None:
+        self._populate_printer_combo(keep_selection=True)
+        self._refresh_all()
+        logger.info("🔄 Printer list refreshed")
+
+    def _on_printer_selected(self, index: int) -> None:
+        name = self.printer_combo.itemData(index) or ""
+        if name == self.config.printer.name:
+            return
+        self.config.printer.name = name
+        try:
+            save_config(self.config)
+            logger.info("🖨️ Printer set to: %s", name or "(Windows default)")
+        except Exception:
+            logger.exception("Failed to save printer selection to config.yaml")
+        self._refresh_all()
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
