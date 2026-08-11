@@ -7,6 +7,7 @@ Non-secret, machine-specific settings live in config/config.yaml
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,11 +98,20 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
 
     config_path = Path(config_path) if config_path else PROJECT_ROOT / "config" / "config.yaml"
     if not config_path.exists():
+        # Every value in config.example.yaml is already a safe default
+        # (printer name "" just means "no override yet" — the UI's
+        # printer picker fills that in and persists it via
+        # save_config()) so a first run on a new machine should just
+        # work, not force a manual copy/edit step before the app will
+        # even open.
         example = PROJECT_ROOT / "config" / "config.example.yaml"
-        raise FileNotFoundError(
-            f"Config file not found: {config_path}\n"
-            f"Copy {example} to {config_path} and edit it first."
-        )
+        if not example.exists():
+            raise FileNotFoundError(
+                f"Config file not found: {config_path}\n"
+                f"config.example.yaml is also missing from {example.parent} — reinstall the app."
+            )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(example, config_path)
 
     with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}

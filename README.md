@@ -143,22 +143,16 @@ pip install -r requirements.txt
 
 ## 6. Configuration
 
-```bash
-copy config\config.example.yaml config\config.yaml
-copy .env.example .env
-```
+`config/config.yaml` doesn't need to be created by hand — running the
+app auto-creates it from `config.example.yaml` on first launch if
+it's missing. Pick the printer from the in-app dropdown afterwards
+(see "Printer selection" in section 7); that choice is saved straight
+back into `config.yaml`. Only copy/edit it yourself if you want other
+settings (template path, sync interval, etc.) different from the
+defaults shown in `config/config.example.yaml`.
 
-Edit **`config/config.yaml`**:
-```yaml
-printer:
-  name: "EPSON L3110 Series"   # exact name from "Devices and Printers"; "" = system default
-  copies: 1
-template:
-  path: "templates/ticket_template_highres.png"
-  number_padding: 0              # set to e.g. 3 for "007" instead of "7"
-sync:
-  enabled: true
-  interval_seconds: 15
+```bash
+copy .env.example .env
 ```
 
 Edit **`.env`** (git-ignored, never commit real values):
@@ -236,20 +230,45 @@ default `_internal/` subfolder, which matters here: `app/config.py`
 resolves `PROJECT_ROOT` from `sys.executable`'s folder when frozen, so
 `config/`, `templates/`, and `data/` must sit right next to the .exe.
 
-Before first run, copy your real settings into the dist folder (they
-are *not* bundled — same git-ignored, machine-specific files as the
-source install):
+`config/config.yaml` doesn't need to be prepared before deploying to a
+new PC: if it's missing, `config.py` auto-creates it from
+`config.example.yaml` (bundled) on first launch, using safe defaults
+— the printer is picked afterwards from the in-app dropdown (see
+"Printer selection" below), which persists straight back into that
+same `config.yaml`, so there's nothing to hand-edit for a normal
+deploy.
+
+`.env` (Supabase URL/key) is the one file that *is* machine-specific
+in a way that can't be defaulted, since it holds real secrets — copy
+it over if this PC should sync to the cloud mirror:
 ```bash
-copy config\config.yaml dist\ZNU_QueueTicketPrinter\config\config.yaml
 copy .env dist\ZNU_QueueTicketPrinter\.env
 ```
+Skipping it is fine too: the app runs and prints normally offline,
+just without cloud sync, until a `.env` is added later.
 
 Then `dist\ZNU_QueueTicketPrinter\ZNU_QueueTicketPrinter.exe` runs
 standalone — copy that whole folder to the printing PC (no Python
-required there). `data/` (the SQLite DB, logs, temp files) is created
-inside it on first run, same as the source install. Rebuild and
-re-copy the exe whenever the source code changes; `config.yaml`/`.env`/
-`data/` don't need to be touched again after the first deploy.
+required there). `data/` (the SQLite DB, logs, temp files) and
+`config/config.yaml` are created inside it on first run. Rebuild and
+re-copy the exe whenever the source code changes; the generated
+`config.yaml`/`data/` don't need to be touched again after the first
+deploy (the printer selection survives via `config.yaml`, and can be
+changed anytime from the dropdown without re-deploying anything).
+
+### Printer selection
+
+The main window has a printer dropdown (with a ⟳ refresh button) that
+lists every printer Windows currently reports. Picking one writes it
+to `config.yaml` immediately, so it's what the app prints to from
+then on — regardless of what Windows itself considers the "default
+printer". This matters because Windows can silently reassign its own
+default (e.g. to "Microsoft Print to PDF" when the physical receipt
+printer gets unplugged), and previously that meant tickets could
+start printing to the wrong destination without anyone changing
+anything in this app. If the real printer disappears and comes back
+(unplugged/replugged, driver reinstalled), hit ⟳ to re-scan and
+re-select it.
 
 ## 8. Testing checklist
 
