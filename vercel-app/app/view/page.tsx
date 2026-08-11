@@ -33,6 +33,14 @@ const STAGES = [
 
 type StageKey = (typeof STAGES)[number]["key"];
 
+const STAGE_LABEL: Record<StageKey, string> = {
+  generalWaiting: "في انتظار المراجعة",
+  firstReview: "عند المراجع الأول",
+  waitingAdmission: "في انتظار شؤون الطلاب",
+  atAdmission: "عند شؤون الطلاب الآن",
+  completed: "خلّص",
+};
+
 /** Which stage a ticket is in. A PRINTED ticket that has never been
  * called is the general waiting hall — there is no separate WAITING
  * status in the database (see app/core/queue_service.py). */
@@ -45,11 +53,18 @@ function stageOf(t: Ticket): StageKey | null {
   return null; // RESERVED / PRINT_FAILED / CANCELLED — never issued to a student
 }
 
+/** What a drill-down is currently showing. Stored as a predicate rather
+ * than a snapshot of matching tickets, so the open list keeps updating
+ * itself on every 5s refresh / Realtime event instead of freezing at
+ * whatever was true when it was opened. */
+type Drill = { title: string; match: (t: Ticket) => boolean } | null;
+
 export default function ViewPage() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [businessDate, setBusinessDate] = useState("");
   const [openCounter, setOpenCounter] = useState<number | null>(null);
   const [offline, setOffline] = useState(false);
+  const [drill, setDrill] = useState<Drill>(null);
 
   useEffect(() => {
     setBusinessDate(todayBusinessDate());
@@ -147,18 +162,96 @@ export default function ViewPage() {
     };
   }, [tickets]);
 
+  // Drill-down: the actual ticket numbers behind whichever figure was
+  // tapped. Recomputed from the live `tickets` on every refresh, so a
+  // list left open on a screen stays correct as students move along.
+  if (drill) {
+    const matching = tickets.filter((t) => stageOf(t) !== null && drill.match(t));
+    return (
+      <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col items-center px-4 py-8 gap-4">
+        <header className="w-full max-w-md flex items-center gap-3">
+          <button
+            onClick={() => setDrill(null)}
+            className="bg-white border border-slate-200 rounded-xl px-4 py-2 font-bold text-blue-900 shadow-sm"
+          >
+            ← رجوع
+          </button>
+          <div className="flex-1 text-end">
+            <h1 className="text-base font-extrabold text-blue-900 leading-tight">{drill.title}</h1>
+            <div className="text-xs text-slate-500">{matching.length} رقم</div>
+          </div>
+        </header>
+
+        {matching.length === 0 ? (
+          <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl py-12 text-center text-slate-500 text-sm">
+            مفيش أرقام هنا دلوقتي
+          </div>
+        ) : (
+          <div className="w-full max-w-md flex flex-col gap-2">
+            {matching.map((t) => {
+              const stage = stageOf(t)!;
+              return (
+                <div
+                  key={t.ticket_number}
+                  className="bg-white border border-slate-200 rounded-2xl shadow-sm px-5 py-4 flex items-center gap-4"
+                >
+                  <span className="text-3xl font-extrabold text-blue-900 min-w-[3rem] text-center">
+                    {t.ticket_number}
+                  </span>
+                  <div className="flex-1 text-end">
+                    <div className="font-bold text-slate-800 text-sm leading-tight">
+                      {certificateLabel(t.certificate_type)}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      {STAGE_LABEL[stage]}
+                      {t.counter_number != null && ` · مكتب ${t.counter_number}`}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {offline && (
+          <div className="fixed bottom-0 left-0 right-0 bg-orange-100 text-orange-800 text-center py-2 text-sm">
+            انقطع الاتصال — جاري إعادة المحاولة…
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col items-center px-4 py-8 gap-5">
       <header className="text-center">
         <h1 className="text-xl font-extrabold text-blue-900">إحصائية اليوم</h1>
         <div className="text-xs text-slate-500 mt-1">{businessDate}</div>
+        <div className="text-[11px] text-slate-400 mt-1">اضغط على أي رقم تشوف الأرقام اللي جواه</div>
       </header>
 
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm px-6 py-4 text-center w-full max-w-md">
         <div className="text-xs text-slate-500">إجمالي الأرقام النهارده</div>
-        <div className="text-4xl font-extrabold text-blue-900 mt-1">{stats.total}</div>
+        <button
+          onClick={() => setDrill({ title: "كل أرقام النهارده", match: () => true })}
+          className="text-4xl font-extrabold text-blue-900 mt-1 hover:text-blue-700"
+        >
+          {stats.total}
+        </button>
         <div className="text-xs text-slate-500 mt-2">
-          منهم <span className="font-bold text-indigo-700">{stats.reachedAdmission}</span> وصلوا لشؤون الطلاب
+          منهم{" "}
+          <button
+            onClick={() =>
+              setDrill({
+                title: "وصلوا لشؤون الطلاب",
+                match: (t) => stageOf(t) === "atAdmission" || stageOf(t) === "completed",
+              })
+            }
+            className="font-bold text-indigo-700 underline decoration-dotted underline-offset-2"
+          >
+            {stats.reachedAdmission}
+          </button>{" "}
+          وصلوا لشؤون الطلاب
         </div>
       </div>
 
@@ -168,9 +261,12 @@ export default function ViewPage() {
           كل واحد فين دلوقتي
         </div>
         {STAGES.map((stage) => (
-          <div
+          <button
             key={stage.key}
-            className="flex items-center justify-between px-5 py-3 border-b border-slate-100 last:border-b-0"
+            onClick={() =>
+              setDrill({ title: stage.label, match: (t) => stageOf(t) === stage.key })
+            }
+            className="w-full flex items-center justify-between px-5 py-3 border-b border-slate-100 last:border-b-0 hover:bg-slate-50 active:bg-slate-100"
           >
             <span className="font-bold text-slate-700">{stage.label}</span>
             <span
@@ -180,7 +276,7 @@ export default function ViewPage() {
             >
               {stats.byStage[stage.key]}
             </span>
-          </div>
+          </button>
         ))}
       </section>
 
@@ -199,29 +295,50 @@ export default function ViewPage() {
               <span className="w-12 text-center">منتظر</span>
               <span className="w-12 text-center">خلص</span>
             </div>
-            {stats.certRows.map((row) => (
-              <div
-                key={row.value}
-                className="grid grid-cols-[1fr_auto_auto_auto] gap-2 items-center px-5 py-3 border-b border-slate-100 last:border-b-0"
-              >
-                <span className="font-bold text-slate-800 text-sm leading-tight">{row.label}</span>
-                <span className="w-12 text-center text-lg font-extrabold text-slate-700">{row.total}</span>
-                <span
-                  className={`w-12 text-center text-lg font-extrabold ${
-                    row.waitingAdmission > 0 ? "text-blue-700" : "text-slate-300"
-                  }`}
+            {stats.certRows.map((row) => {
+              const matchesCert = (t: Ticket) =>
+                row.value === "__none__" ? !t.certificate_type : t.certificate_type === row.value;
+              return (
+                <div
+                  key={row.value}
+                  className="grid grid-cols-[1fr_auto_auto_auto] gap-2 items-center px-5 py-3 border-b border-slate-100 last:border-b-0"
                 >
-                  {row.waitingAdmission}
-                </span>
-                <span
-                  className={`w-12 text-center text-lg font-extrabold ${
-                    row.completed > 0 ? "text-green-700" : "text-slate-300"
-                  }`}
-                >
-                  {row.completed}
-                </span>
-              </div>
-            ))}
+                  <span className="font-bold text-slate-800 text-sm leading-tight">{row.label}</span>
+                  <button
+                    onClick={() => setDrill({ title: row.label, match: matchesCert })}
+                    className="w-12 text-center text-lg font-extrabold text-slate-700 hover:text-blue-700"
+                  >
+                    {row.total}
+                  </button>
+                  <button
+                    onClick={() =>
+                      setDrill({
+                        title: `${row.label} — منتظرين شؤون الطلاب`,
+                        match: (t) => matchesCert(t) && stageOf(t) === "waitingAdmission",
+                      })
+                    }
+                    className={`w-12 text-center text-lg font-extrabold ${
+                      row.waitingAdmission > 0 ? "text-blue-700 hover:text-blue-500" : "text-slate-300"
+                    }`}
+                  >
+                    {row.waitingAdmission}
+                  </button>
+                  <button
+                    onClick={() =>
+                      setDrill({
+                        title: `${row.label} — خلّصوا`,
+                        match: (t) => matchesCert(t) && stageOf(t) === "completed",
+                      })
+                    }
+                    className={`w-12 text-center text-lg font-extrabold ${
+                      row.completed > 0 ? "text-green-700 hover:text-green-600" : "text-slate-300"
+                    }`}
+                  >
+                    {row.completed}
+                  </button>
+                </div>
+              );
+            })}
           </>
         )}
         <div className="px-5 py-2 bg-slate-50 border-t border-slate-200 text-[11px] text-slate-500">
