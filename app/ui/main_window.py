@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import AppConfig, save_config
+from app.core.certificates import certificate_label
 from app.core.database import Database
 from app.core.models import TicketStatus
 from app.core.session_service import SessionService
@@ -40,6 +41,7 @@ from app.printing.printer_service import PrintError
 from app.printing.ticket_image import TicketImageError
 from app.sync.supabase_client import SupabaseSyncClient, SupabaseUnavailable
 from app.sync.sync_manager import SyncManager
+from app.ui.certificate_dialog import ask_for_certificate
 from app.ui.styles import STYLESHEET
 
 logger = get_logger("ui")
@@ -191,8 +193,16 @@ class MainWindow(QMainWindow):
         self.current_number_label = QLabel("—")
         self.current_number_label.setObjectName("bigNumber")
         self.current_number_label.setAlignment(Qt.AlignCenter)
+        # Confirms which certificate the number that just came out of
+        # the printer was issued for — the employee's only chance to
+        # notice a mis-tap before handing the ticket over.
+        self.current_certificate_label = QLabel("")
+        self.current_certificate_label.setObjectName("certificateLabel")
+        self.current_certificate_label.setAlignment(Qt.AlignCenter)
+        self.current_certificate_label.setWordWrap(True)
         cc_layout.addWidget(cc_label)
         cc_layout.addWidget(self.current_number_label)
+        cc_layout.addWidget(self.current_certificate_label)
         layout.addWidget(current_card)
 
         # Next number card
@@ -341,6 +351,9 @@ class MainWindow(QMainWindow):
         self.current_number_label.setText(
             str(stats["current_number"]) if stats["current_number"] else "—"
         )
+        self.current_certificate_label.setText(
+            certificate_label(stats["current_certificate"]) if stats["current_number"] else ""
+        )
         self.next_number_label.setText(str(stats["next_number"]))
         self.today_count_label.setText(str(stats["today_count"]))
         self.last_printed_label.setText(
@@ -372,7 +385,14 @@ class MainWindow(QMainWindow):
                     f"فشلت طباعة التذكرة رقم {unresolved.ticket_number}: "
                     f"{unresolved.error_message or 'خطأ غير معروف'}"
                 )
-            self.retry_button.setText(f"إعادة طباعة الرقم {unresolved.ticket_number}")
+            # The certificate is fixed at reservation time, so a retry
+            # reprints the same number for the same certificate — no
+            # need to ask again, but do show it so the employee can see
+            # what they're about to hand over.
+            self.retry_button.setText(
+                f"إعادة طباعة الرقم {unresolved.ticket_number}"
+                f" ({certificate_label(unresolved.certificate_type)})"
+            )
             self.print_button.setEnabled(False)
             self.test_button.setEnabled(False)
         else:
@@ -483,12 +503,25 @@ class MainWindow(QMainWindow):
         self._print_next(test=True)
 
     def _print_next(self, test: bool) -> None:
+        # Ask for the certificate BEFORE reserving anything: cancelling
+        # the picker must leave the sequence untouched, so a mis-click
+        # on the print button can never burn a ticket number.
+        certificate_type = ask_for_certificate(
+            self,
+            "اختر نوع الشهادة (رقم تجريبي)" if test else "اختر نوع الشهادة",
+        )
+        if certificate_type is None:
+            logger.info("Certificate selection cancelled — no number was reserved")
+            return
+
         self.error_label.setText("")
         self.print_button.setEnabled(False)
         self.test_button.setEnabled(False)
         try:
-            ticket = self.ticket_service.reserve_next_ticket(self.session.id)
-            logger.info("Reserved ticket #%s", ticket.ticket_number)
+            ticket = self.ticket_service.reserve_next_ticket(self.session.id, certificate_type)
+            logger.info(
+                "Reserved ticket #%s (%s)", ticket.ticket_number, certificate_label(certificate_type)
+            )
             self._refresh_all()
             self._do_print(ticket, test=test)
         finally:

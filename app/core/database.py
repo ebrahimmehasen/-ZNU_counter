@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     device_id      TEXT,
     printer_name   TEXT,
     error_message  TEXT,
+    certificate_type TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
     UNIQUE(session_id, ticket_number)
@@ -109,6 +110,12 @@ class Database:
             self._conn.execute("ALTER TABLE tickets ADD COLUMN counter_id INTEGER REFERENCES counters(id)")
         if "called_at" not in existing:
             self._conn.execute("ALTER TABLE tickets ADD COLUMN called_at TEXT")
+        # Which certificate the student is here for, chosen at print
+        # time (see ui/certificate_dialog.py). Nullable on purpose:
+        # tickets printed before this column existed keep working and
+        # simply have no certificate queue to move into.
+        if "certificate_type" not in existing:
+            self._conn.execute("ALTER TABLE tickets ADD COLUMN certificate_type TEXT")
 
     def _ensure_device_id(self) -> None:
         row = self._conn.execute(

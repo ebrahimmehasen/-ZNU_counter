@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { certificateLabel } from "@/lib/certificates";
 import {
+  announceAdmissionTicket,
   announceTest,
   announceTicket,
   getArabicVoices,
@@ -13,14 +15,35 @@ import {
   unlockSpeech,
 } from "@/lib/speech";
 
-type CalledTicket = { ticket_number: number; counter_number: number; called_at: string };
+// A student is called twice over their visit — once to a first-review
+// counter, and again to student affairs for their certificate. Both
+// are announcements the waiting hall needs to hear, so the display
+// treats them as one time-ordered stream rather than two lists, and
+// each entry carries where the student should actually go.
+type CalledEntry =
+  | { kind: "counter"; ticketNumber: number; at: string; counterNumber: number }
+  | { kind: "admission"; ticketNumber: number; at: string; certificateType: string | null };
+
+// Every status meaning "this number was really issued today". A ticket
+// must not drop out of the day's total just because it moved further
+// down the workflow.
+const ISSUED_STATUSES = [
+  "PRINTED",
+  "CALLED",
+  "WAITING_FOR_ADMISSION",
+  "CALLED_BY_ADMISSION",
+  "COMPLETED",
+];
+// Everything past the general waiting hall — i.e. already called at
+// least once.
+const CALLED_STATUSES = ["CALLED", "WAITING_FOR_ADMISSION", "CALLED_BY_ADMISSION", "COMPLETED"];
 
 type DisplayData = {
-  // Last 5 called tickets, most recent first — not just the single
-  // latest one. If counter 3 calls #45 and counter 5 calls #46 a
-  // moment later, #45's "go to counter 3" must stay on screen, not
-  // vanish the instant a different counter calls someone else.
-  recentlyCalled: CalledTicket[];
+  // Last 5 calls, most recent first — not just the single latest one.
+  // If counter 3 calls #45 and counter 5 calls #46 a moment later,
+  // #45's "go to counter 3" must stay on screen, not vanish the
+  // instant a different counter calls someone else.
+  recentlyCalled: CalledEntry[];
   nextNumbers: number[];
   stats: { totalToday: number; waiting: number; called: number };
 };
@@ -32,43 +55,77 @@ const EMPTY: DisplayData = {
 };
 
 async function fetchDisplayData(businessDate: string): Promise<DisplayData> {
-  const [{ data: calledRows }, { data: waitingRows }, { count: totalToday }, { count: waiting }, { count: called }] =
-    await Promise.all([
-      supabase
-        .from("tickets")
-        .select("ticket_number, counter_number, called_at")
-        .eq("business_date", businessDate)
-        .eq("status", "CALLED")
-        .order("called_at", { ascending: false })
-        .limit(5),
-      supabase
-        .from("tickets")
-        .select("ticket_number")
-        .eq("business_date", businessDate)
-        .eq("status", "PRINTED")
-        .is("called_at", null)
-        .order("ticket_number", { ascending: true })
-        .limit(6),
-      supabase
-        .from("tickets")
-        .select("uuid", { count: "exact", head: true })
-        .eq("business_date", businessDate)
-        .in("status", ["PRINTED", "CALLED"]),
-      supabase
-        .from("tickets")
-        .select("uuid", { count: "exact", head: true })
-        .eq("business_date", businessDate)
-        .eq("status", "PRINTED")
-        .is("called_at", null),
-      supabase
-        .from("tickets")
-        .select("uuid", { count: "exact", head: true })
-        .eq("business_date", businessDate)
-        .eq("status", "CALLED"),
-    ]);
+  const [
+    { data: calledRows },
+    { data: admissionRows },
+    { data: waitingRows },
+    { count: totalToday },
+    { count: waiting },
+    { count: called },
+  ] = await Promise.all([
+    supabase
+      .from("tickets")
+      .select("ticket_number, counter_number, called_at")
+      .eq("business_date", businessDate)
+      .eq("status", "CALLED")
+      .order("called_at", { ascending: false })
+      .limit(5),
+    supabase
+      .from("tickets")
+      .select("ticket_number, certificate_type, admission_called_at")
+      .eq("business_date", businessDate)
+      .eq("status", "CALLED_BY_ADMISSION")
+      .order("admission_called_at", { ascending: false })
+      .limit(5),
+    supabase
+      .from("tickets")
+      .select("ticket_number")
+      .eq("business_date", businessDate)
+      .eq("status", "PRINTED")
+      .is("called_at", null)
+      .order("ticket_number", { ascending: true })
+      .limit(6),
+    supabase
+      .from("tickets")
+      .select("uuid", { count: "exact", head: true })
+      .eq("business_date", businessDate)
+      .in("status", ISSUED_STATUSES),
+    supabase
+      .from("tickets")
+      .select("uuid", { count: "exact", head: true })
+      .eq("business_date", businessDate)
+      .eq("status", "PRINTED")
+      .is("called_at", null),
+    supabase
+      .from("tickets")
+      .select("uuid", { count: "exact", head: true })
+      .eq("business_date", businessDate)
+      .in("status", CALLED_STATUSES),
+  ]);
+
+  const merged: CalledEntry[] = [
+    ...(calledRows || []).map(
+      (r): CalledEntry => ({
+        kind: "counter",
+        ticketNumber: r.ticket_number,
+        at: r.called_at,
+        counterNumber: r.counter_number,
+      })
+    ),
+    ...(admissionRows || []).map(
+      (r): CalledEntry => ({
+        kind: "admission",
+        ticketNumber: r.ticket_number,
+        at: r.admission_called_at,
+        certificateType: r.certificate_type,
+      })
+    ),
+  ]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, 5);
 
   return {
-    recentlyCalled: calledRows || [],
+    recentlyCalled: merged,
     nextNumbers: (waitingRows || []).map((r) => r.ticket_number),
     stats: {
       totalToday: totalToday ?? 0,
@@ -124,23 +181,28 @@ export default function DisplayPage() {
     try {
       const next = await fetchDisplayData(businessDate);
 
-      // Anything called after the newest called_at we've already
-      // handled is new. There can be more than one (two counters
-      // calling within the same poll/Realtime tick) — announce all of
-      // them, oldest first, so they play back in the order they
-      // actually happened rather than overlapping or skipping ahead.
+      // Anything called after the newest timestamp we've already
+      // handled is new. There can be more than one (two counters, or a
+      // counter and an admission desk, calling within the same
+      // poll/Realtime tick) — announce all of them, oldest first, so
+      // they play back in the order they actually happened rather than
+      // overlapping or skipping ahead.
       const newCalls = lastCalledAt.current
-        ? next.recentlyCalled.filter((c) => c.called_at > lastCalledAt.current!)
+        ? next.recentlyCalled.filter((c) => c.at > lastCalledAt.current!)
         : [];
       if (lastCalledAt.current !== null && newCalls.length > 0) {
         setFlash(true);
         setTimeout(() => setFlash(false), 1200);
         [...newCalls]
-          .sort((a, b) => a.called_at.localeCompare(b.called_at))
-          .forEach((c) => announceTicket(c.ticket_number, c.counter_number));
+          .sort((a, b) => a.at.localeCompare(b.at))
+          .forEach((c) =>
+            c.kind === "counter"
+              ? announceTicket(c.ticketNumber, c.counterNumber)
+              : announceAdmissionTicket(c.ticketNumber, certificateLabel(c.certificateType))
+          );
       }
       if (next.recentlyCalled.length > 0) {
-        lastCalledAt.current = next.recentlyCalled[0].called_at; // [0] is the newest (query orders desc)
+        lastCalledAt.current = next.recentlyCalled[0].at; // [0] is the newest (list is sorted desc)
       }
 
       setData(next);
@@ -199,19 +261,30 @@ export default function DisplayPage() {
             ) : (
               data.recentlyCalled.map((c, i) => (
                 <div
-                  key={c.called_at}
-                  className={`flex items-center justify-between rounded-2xl px-6 transition-colors duration-700 ${
+                  key={`${c.kind}-${c.at}-${c.ticketNumber}`}
+                  className={`flex items-center justify-between gap-3 rounded-2xl px-6 transition-colors duration-700 ${
                     i === 0
                       ? `py-5 ${flash ? "bg-green-900/60" : "bg-blue-950/60"} border border-blue-800`
                       : "py-3 bg-slate-800/60"
                   }`}
                 >
                   <span className={`font-extrabold ${i === 0 ? "text-[64px] sm:text-[80px]" : "text-3xl sm:text-4xl text-slate-300"}`}>
-                    {c.ticket_number}
+                    {c.ticketNumber}
                   </span>
-                  <span className={`font-bold ${i === 0 ? "text-2xl sm:text-3xl text-blue-300" : "text-lg sm:text-xl text-blue-400"}`}>
-                    مكتب رقم {c.counter_number}
-                  </span>
+                  {c.kind === "counter" ? (
+                    <span className={`font-bold text-end ${i === 0 ? "text-2xl sm:text-3xl text-blue-300" : "text-lg sm:text-xl text-blue-400"}`}>
+                      مكتب رقم {c.counterNumber}
+                    </span>
+                  ) : (
+                    <span className={`font-bold text-end ${i === 0 ? "text-emerald-300" : "text-emerald-400"}`}>
+                      <span className={i === 0 ? "text-2xl sm:text-3xl" : "text-lg sm:text-xl"}>
+                        شؤون الطلاب
+                      </span>
+                      <span className={`block ${i === 0 ? "text-base sm:text-xl" : "text-xs sm:text-sm"} opacity-80`}>
+                        {certificateLabel(c.certificateType)}
+                      </span>
+                    </span>
+                  )}
                 </div>
               ))
             )}

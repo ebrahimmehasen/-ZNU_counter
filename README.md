@@ -74,6 +74,7 @@ QueueSystem/
 │   ├── core/
 │   │   ├── database.py          # SQLite connection, schema, transactions
 │   │   ├── models.py            # Ticket / DailySession / status enums
+│   │   ├── certificates.py      # the 13 certificate types (single source of truth)
 │   │   ├── session_service.py   # daily business-session lookup/creation
 │   │   └── ticket_service.py    # reserve/print/fail/retry/cancel + sync queries
 │   ├── printing/
@@ -85,6 +86,7 @@ QueueSystem/
 │   │   └── sync_manager.py      # background QThread sync loop
 │   └── ui/
 │       ├── main_window.py       # the one-screen employee UI
+│       ├── certificate_dialog.py # "which certificate?" popup shown before every print
 │       └── styles.py
 ├── config/
 │   └── config.example.yaml      # copy to config.yaml
@@ -256,6 +258,21 @@ re-copy the exe whenever the source code changes; the generated
 deploy (the printer selection survives via `config.yaml`, and can be
 changed anytime from the dropdown without re-deploying anything).
 
+### Certificate selection (before every printed number)
+
+Both **طباعة التذكرة التالية** and **سحب رقم تجريبي** open a popup
+listing the 13 certificate types first; the number is only reserved
+and printed after one is chosen. Cancelling the popup reserves
+nothing, so a mis-click on the print button can't burn a ticket
+number.
+
+The chosen certificate is stored on the ticket and pushed to Supabase
+with it, which is what later routes the student into the right
+student-affairs queue — see **PHASE3_ADMISSION.md** for the full
+two-stage workflow and the `/admission` page. The certificate is fixed
+at reservation time, so a reprint after a paper jam keeps the same
+number *and* the same certificate without asking again.
+
 ### Printer selection
 
 The main window has a printer dropdown (with a ⟳ refresh button) that
@@ -272,9 +289,9 @@ re-select it.
 
 ## 8. Testing checklist
 
-Automated (`pytest tests/ -v` — 15 tests, all passing, cover sequencing/
-crash-recovery/retry/cancel/day-rollover/restart/sync-queue/ticket-image
-logic without touching Word or a real printer):
+Automated (`pytest tests/ -v` — 40 tests, all passing, cover sequencing/
+crash-recovery/retry/cancel/day-rollover/restart/sync-queue/ticket-image/
+certificate logic without touching Word or a real printer):
 
 - [x] Sequential numbering starts at 1 and increments correctly
 - [x] Print failure does not mark PRINTED; retry reuses the same number
@@ -285,6 +302,14 @@ logic without touching Word or a real printer):
 - [x] Restart resumes numbering from the last ticket (same DB file)
 - [x] Pending-sync queue only contains PRINTED tickets, clears on mark_synced
 - [x] 150 sequential tickets in one session number and count correctly
+- [x] The chosen certificate is stored on the ticket and survives failure/retry
+- [x] Each ticket keeps its own certificate; reserving without one still works
+- [x] A pre-certificate `queue.db` migrates without losing tickets
+- [x] Tickets advanced past the first reviewer still count in the day's total
+- [x] The certificate dialog can actually be *shown* (regression: it segfaulted)
+- [x] Every certificate has a button, and each button selects its own value
+- [x] Cancelling the dialog selects nothing (so no number is reserved)
+- [x] The Python and TypeScript certificate lists have not drifted apart
 
 Manual, on the real machine with printer + template configured:
 

@@ -48,7 +48,13 @@ class TicketService:
 
     # ---- ticket numbering / printing lifecycle -------------------------
 
-    def reserve_next_ticket(self, session_id: int) -> Ticket:
+    def reserve_next_ticket(self, session_id: int, certificate_type: Optional[str] = None) -> Ticket:
+        """`certificate_type` is the stable id from core/certificates.py,
+        chosen by the employee before printing. It's stored at
+        reservation time (not after a successful print) so a ticket that
+        fails to print and is retried keeps the certificate it was
+        issued for, and so the value can never be lost between the two
+        steps. Optional to keep every existing caller/test working."""
         with self.db.transaction() as conn:
             row = conn.execute(
                 "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
@@ -60,8 +66,8 @@ class TicketService:
             cur = conn.execute(
                 """INSERT INTO tickets
                    (uuid, session_id, ticket_number, status, print_attempts,
-                    sync_status, device_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                    sync_status, device_id, certificate_type, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
                 (
                     ticket_uuid,
                     session_id,
@@ -69,12 +75,13 @@ class TicketService:
                     TicketStatus.RESERVED,
                     SyncStatus.PENDING_SYNC,
                     self.db.device_id,
+                    certificate_type,
                     now,
                     now,
                 ),
             )
             ticket_id = cur.lastrowid
-            self._log_event(conn, ticket_id, "RESERVED", now)
+            self._log_event(conn, ticket_id, "RESERVED", now, {"certificate_type": certificate_type})
             row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
         return Ticket.from_row(row)
 
@@ -193,18 +200,22 @@ class TicketService:
     # ---- status / stats for the UI -------------------------------------
 
     def get_today_stats(self, session_id: int) -> dict:
-        # "printed today" means successfully printed at any point, regardless
-        # of whether it has since been called (PRINTED or CALLED) — a ticket
-        # moving through the public-queue lifecycle must not disappear from
-        # the printer app's own counters.
+        # "printed today" means successfully printed at any point, no matter
+        # how far down the workflow it has since travelled (called by the
+        # first reviewer, queued for admission, completed) — a ticket
+        # moving through the queue lifecycle must not disappear from the
+        # printer app's own counters. Hence TicketStatus.ISSUED rather
+        # than an inline list that would need editing per new status.
+        issued = TicketStatus.ISSUED
+        placeholders = ", ".join("?" * len(issued))
         last_printed = self.db.execute(
-            """SELECT * FROM tickets WHERE session_id=? AND status IN (?, ?)
+            f"""SELECT * FROM tickets WHERE session_id=? AND status IN ({placeholders})
                ORDER BY ticket_number DESC LIMIT 1""",
-            (session_id, TicketStatus.PRINTED, TicketStatus.CALLED),
+            (session_id, *issued),
         ).fetchone()
         count_row = self.db.execute(
-            "SELECT COUNT(*) AS c FROM tickets WHERE session_id=? AND status IN (?, ?)",
-            (session_id, TicketStatus.PRINTED, TicketStatus.CALLED),
+            f"SELECT COUNT(*) AS c FROM tickets WHERE session_id=? AND status IN ({placeholders})",
+            (session_id, *issued),
         ).fetchone()
         max_row = self.db.execute(
             "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
@@ -216,6 +227,7 @@ class TicketService:
         ).fetchone()
         return {
             "current_number": last_printed["ticket_number"] if last_printed else None,
+            "current_certificate": last_printed["certificate_type"] if last_printed else None,
             "next_number": max_row["m"] + 1,
             "today_count": count_row["c"],
             "last_printed_at": last_printed["printed_at"] if last_printed else None,

@@ -43,6 +43,11 @@ class SupabaseSyncClient:
             "printed_at": ticket.printed_at,
             "device_id": ticket.device_id,
             "printer_name": ticket.printer_name,
+            # Drives which certificate queue this ticket lands in after
+            # the first reviewer finishes with it (see the
+            # finish_first_review_and_call_next / admission_call_next
+            # RPCs in supabase/schema.sql).
+            "certificate_type": ticket.certificate_type,
             "created_at": ticket.created_at,
             "updated_at": ticket.updated_at,
         }

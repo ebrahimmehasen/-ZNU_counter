@@ -188,6 +188,19 @@ export function announceTicket(ticketNumber: number, counterNumber: number) {
   void drainQueue();
 }
 
+/** Second-stage call: the student already passed the first reviewer and
+ * is now wanted at student affairs for their specific certificate. The
+ * certificate is spoken because several are queued in parallel — the
+ * number alone doesn't tell the student which desk is calling them.
+ * Goes through the same FIFO queue as the first-stage announcements so
+ * the two stages can never talk over each other. */
+export function announceAdmissionTicket(ticketNumber: number, certificateLabel: string) {
+  announceQueue.push(
+    `الرقم ${arabicNumberWords(ticketNumber)}، شؤون الطلاب، ${certificateLabel}`
+  );
+  void drainQueue();
+}
+
 /** Plays a sample announcement so staff can confirm audio works —
  * and compare how a given voice sounds — without waiting for a real
  * ticket to be called. */

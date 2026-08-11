@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { certificateLabel } from "@/lib/certificates";
 
 const STORAGE_KEY = "queue_counter_number";
 
 type Result =
-  | { kind: "success"; ticketNumber: number }
-  | { kind: "empty" }
+  | { kind: "success"; ticketNumber: number; certificateType: string | null; finishedTicketNumber: number | null }
+  | { kind: "empty"; finishedTicketNumber: number | null }
   | { kind: "error"; message: string }
   | null;
 
@@ -61,17 +62,31 @@ export default function CallPage() {
     setBusy(true);
     setResult(null);
     try {
-      const { data, error } = await supabase.rpc("call_next_ticket", {
+      // One call does both halves of "next": it files the student this
+      // counter just finished into their certificate queue (so student
+      // affairs can pick them up) and claims the next one from the
+      // general hall. See finish_first_review_and_call_next in
+      // supabase/schema.sql for why they must share a transaction.
+      const { data, error } = await supabase.rpc("finish_first_review_and_call_next", {
         p_business_date: todayBusinessDate(),
         p_counter_number: counterNumber,
       });
       if (error) throw error;
 
-      if (!data || data.length === 0) {
-        setResult({ kind: "empty" });
+      const row = data?.[0];
+      const finishedTicketNumber = row?.out_finished_ticket_number ?? null;
+
+      if (!row || row.out_ticket_number === null) {
+        // The previous student may still have been filed successfully
+        // even though nobody is waiting — report that, don't hide it.
+        setResult({ kind: "empty", finishedTicketNumber });
       } else {
-        const ticketNumber = data[0].out_ticket_number;
-        setResult({ kind: "success", ticketNumber });
+        setResult({
+          kind: "success",
+          ticketNumber: row.out_ticket_number,
+          certificateType: row.out_certificate_type ?? null,
+          finishedTicketNumber,
+        });
         refreshServedCount(counterNumber);
       }
     } catch (e) {
@@ -134,11 +149,22 @@ export default function CallPage() {
           {busy ? "جاري النداء…" : "اطلب رقم جديد"}
         </button>
 
-        <div className="mt-5 min-h-[24px] text-sm">
+        <div className="mt-5 min-h-[24px] text-sm flex flex-col gap-2">
           {result?.kind === "success" && (
-            <span className="text-green-700 font-bold">تم نداء الرقم #{result.ticketNumber}</span>
+            <>
+              <span className="text-green-700 font-bold">تم نداء الرقم #{result.ticketNumber}</span>
+              <span className="bg-blue-50 border border-blue-200 text-blue-800 rounded-lg px-3 py-2 font-bold">
+                {certificateLabel(result.certificateType)}
+              </span>
+            </>
           )}
           {result?.kind === "empty" && <span className="text-amber-700 font-bold">مفيش حد مستنّي دلوقتي.</span>}
+          {(result?.kind === "success" || result?.kind === "empty") &&
+            result.finishedTicketNumber !== null && (
+              <span className="text-slate-500 text-xs">
+                الرقم #{result.finishedTicketNumber} اتحوّل لشؤون الطلاب.
+              </span>
+            )}
           {result?.kind === "error" && <span className="text-red-700 font-bold">{result.message}</span>}
         </div>
       </div>
