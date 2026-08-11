@@ -15,7 +15,7 @@ drift, so this comment is enforced rather than aspirational.
 from __future__ import annotations
 
 CERTIFICATE_TYPES: tuple[tuple[str, str], ...] = (
-    ("ig", "شهادات الـ IG (IGCSE/O-Level/A-Level)"),
+    ("ig", "شهادة الدبلومه البريطانية"),
     ("saudi", "شهادة سعودية"),
     ("qatari", "شهادة قطرية"),
     ("bahraini", "شهادة بحرينية"),

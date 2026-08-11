@@ -17,7 +17,7 @@ export type CertificateType = {
 };
 
 export const CERTIFICATE_TYPES: CertificateType[] = [
-  { value: "ig", label: "شهادات الـ IG (IGCSE/O-Level/A-Level)" },
+  { value: "ig", label: "شهادة الدبلومه البريطانية" },
   { value: "saudi", label: "شهادة سعودية" },
   { value: "qatari", label: "شهادة قطرية" },
   { value: "bahraini", label: "شهادة بحرينية" },
