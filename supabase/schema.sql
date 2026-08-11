@@ -150,14 +150,15 @@ grant execute on function call_next_ticket(date, integer) to anon;
 -- Stage 2: first reviewer finishes → ticket enters its certificate queue
 -- ---------------------------------------------------------------------
 --
--- The first reviewer's screen has exactly one button ("next"), and it
--- has always meant "I'm done with the person in front of me, send me
--- the next one". That single action now also has to hand the finished
--- student off to student affairs, so both halves happen in ONE
--- function — and therefore one transaction. Splitting it into two
--- round-trips from the browser would leave a window where a dropped
--- connection strands a student as neither being-reviewed nor queued
--- for admission, with no screen showing them anywhere.
+-- finish_first_review_and_call_next() below does both halves ("I'm
+-- done with this student" + "send me the next one") in one atomic
+-- call. It's kept for compatibility (and still the right choice for
+-- any one-button caller) but the /call page no longer uses it as of
+-- the two-step "اطلب رقم جديد" / "تمت المراجعة" workflow: a reviewer
+-- finishing a student doesn't necessarily mean they're ready for the
+-- next one immediately, so the two actions are split into
+-- finish_first_review() and call_next_ticket() (above), called
+-- separately by two different button states on the same page.
 --
 -- call_next_ticket() above is deliberately left untouched: the older
 -- local FastAPI display (app/web/) and any bookmarked client still
@@ -244,6 +245,54 @@ end;
 $$;
 
 grant execute on function finish_first_review_and_call_next(date, integer) to anon;
+
+-- Just the "I'm done with this student" half, on its own — the /call
+-- page's "تمت المراجعة" (review completed) button. Deliberately does
+-- NOT also claim a next ticket: a reviewer can finish with someone and
+-- not be ready to call the next one immediately (paperwork, a break,
+-- anything), and forcing an immediate call was the bug this function
+-- exists to fix. Same claim/lock shape as the first half of
+-- finish_first_review_and_call_next() above — see that function's
+-- comments for why FOR UPDATE SKIP LOCKED and "most recent CALLED row"
+-- are the right scoping.
+create or replace function finish_first_review(
+    p_business_date date,
+    p_counter_number integer
+)
+returns table(out_finished_ticket_number integer)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_now timestamptz := now();
+    v_finished_number integer;
+begin
+    update tickets t
+    set status = case
+                     when t.certificate_type is null then 'COMPLETED'
+                     else 'WAITING_FOR_ADMISSION'
+                 end,
+        first_review_completed_at = v_now,
+        completed_at = case when t.certificate_type is null then v_now else null end,
+        updated_at = v_now
+    where t.uuid = (
+        select uuid from tickets
+        where business_date = p_business_date
+          and counter_number = p_counter_number
+          and status = 'CALLED'
+        order by called_at desc
+        limit 1
+        for update skip locked
+    )
+    returning t.ticket_number into v_finished_number;
+
+    out_finished_ticket_number := v_finished_number;
+    return next;
+end;
+$$;
+
+grant execute on function finish_first_review(date, integer) to anon;
 
 -- ---------------------------------------------------------------------
 -- Stage 3: student affairs / admission calls the next student
