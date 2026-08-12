@@ -8,11 +8,18 @@
 // accidental back-navigation drops the employee straight back into
 // their dashboard instead of the setup screen.
 //
-// Everything that matters for correctness happens in the
-// admission_call_next() RPC, not here: which queues an employee may
-// call is enforced server-side, and the claim itself is a locked
-// single-row update so two employees pressing NEXT together can never
-// receive the same student. This page only renders what that returns.
+// Same two-step shape as /call: "التالي" only claims the next student
+// (admission_claim_next). While serving them, the SAME button becomes
+// "تمت المراجعة" — pressing it only files the current student as
+// COMPLETED (admission_finish_review); it does not also claim a new
+// one. Finishing a student and being ready for the next one are two
+// separate actions, not one forced click.
+//
+// Everything that matters for correctness happens in those RPCs, not
+// here: which queues an employee may call is enforced server-side, and
+// each claim/finish is a locked single-row update so two employees
+// pressing "التالي" together can never receive the same student. This
+// page only renders what the RPCs return.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
@@ -28,8 +35,9 @@ type NowServing = {
   calledAt: string;
 };
 
-type CallOutcome =
+type Outcome =
   | { kind: "empty" }
+  | { kind: "finished"; ticketNumber: number }
   | { kind: "error"; message: string }
   | null;
 
@@ -58,7 +66,7 @@ export default function AdmissionPage() {
 
   const [waitingByType, setWaitingByType] = useState<Record<string, number>>({});
   const [nowServing, setNowServing] = useState<NowServing | null>(null);
-  const [outcome, setOutcome] = useState<CallOutcome>(null);
+  const [outcome, setOutcome] = useState<Outcome>(null);
   const [busy, setBusy] = useState(false);
   const [offline, setOffline] = useState(false);
   const [soundAvailable, setSoundAvailable] = useState(false);
@@ -179,13 +187,13 @@ export default function AdmissionPage() {
     setOutcome(null);
   }
 
-  async function callNext() {
+  async function claimNext() {
     if (!selected || selected.length === 0) return;
     setBusy(true);
     setOutcome(null);
     unlockSpeech();
     try {
-      const { data, error } = await supabase.rpc("admission_call_next", {
+      const { data, error } = await supabase.rpc("admission_claim_next", {
         p_business_date: businessDate,
         p_certificate_types: selected,
         p_desk: deskId,
@@ -208,6 +216,31 @@ export default function AdmissionPage() {
           announceAdmissionTicket(called.ticketNumber, certificateLabel(called.certificateType));
         }
       }
+      refresh();
+    } catch (e) {
+      setOutcome({
+        kind: "error",
+        message: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finishReview() {
+    if (!nowServing) return;
+    setBusy(true);
+    setOutcome(null);
+    try {
+      const { data, error } = await supabase.rpc("admission_finish_review", {
+        p_business_date: businessDate,
+        p_desk: deskId,
+      });
+      if (error) throw error;
+
+      const finishedNumber = data?.[0]?.out_finished_ticket_number ?? nowServing.ticketNumber;
+      setOutcome({ kind: "finished", ticketNumber: finishedNumber });
+      setNowServing(null);
       refresh();
     } catch (e) {
       setOutcome({
@@ -295,15 +328,30 @@ export default function AdmissionPage() {
         )}
       </section>
 
-      <button
-        onClick={callNext}
-        disabled={busy}
-        className="w-full max-w-md bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-extrabold text-2xl rounded-2xl py-7"
-      >
-        {busy ? "جاري النداء…" : "التالي"}
-      </button>
+      {nowServing ? (
+        <button
+          onClick={finishReview}
+          disabled={busy}
+          className="w-full max-w-md bg-amber-600 hover:bg-amber-700 disabled:bg-slate-400 text-white font-extrabold text-2xl rounded-2xl py-7"
+        >
+          {busy ? "جاري الحفظ…" : "تمت المراجعة"}
+        </button>
+      ) : (
+        <button
+          onClick={claimNext}
+          disabled={busy}
+          className="w-full max-w-md bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-extrabold text-2xl rounded-2xl py-7"
+        >
+          {busy ? "جاري النداء…" : "التالي"}
+        </button>
+      )}
 
-      <div className="min-h-[20px] text-sm">
+      <div className="min-h-[20px] text-sm text-center">
+        {outcome?.kind === "finished" && (
+          <span className="text-slate-500 text-xs">
+            الرقم #{outcome.ticketNumber} خلّص. اضغط &quot;التالي&quot; لما تكون جاهز.
+          </span>
+        )}
         {outcome?.kind === "empty" && (
           <span className="text-amber-700 font-bold">لا يوجد طلاب في الانتظار حاليًا.</span>
         )}
