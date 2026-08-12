@@ -196,7 +196,7 @@ export function announceTicket(ticketNumber: number, counterNumber: number) {
  * the two stages can never talk over each other. */
 export function announceAdmissionTicket(ticketNumber: number, certificateLabel: string) {
   announceQueue.push(
-    `الرقم ${arabicNumberWords(ticketNumber)}، شؤون الطلاب، ${certificateLabel}`
+    `الرقم ${arabicNumberWords(ticketNumber)} توجه لمكتب شؤون الطلاب ${certificateLabel}`
   );
   void drainQueue();
 }
