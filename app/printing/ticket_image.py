@@ -76,7 +76,7 @@ DATETIME_FONT_SIZE = 115
 # real coordinates once the template is updated to reserve space for
 # this line and the position is measured the same way NUMBER_BOX and
 # DATETIME_CENTER were (see this module's docstring).
-BUILDING_PROGRAM_CENTER = (1889, 3990)  # x, y
+BUILDING_PROGRAM_CENTER = (1889, 4050)  # x, y
 BUILDING_PROGRAM_FONT_SIZE = 100
 
 
@@ -88,13 +88,10 @@ def _format_datetime_line(moment: datetime) -> str:
 
 
 def _format_building_program_line(building: Optional[str], program: Optional[str]) -> Optional[str]:
-    b_label = building_label(building) if building else None
-    p_label = program_label(program) if program else None
-    if not b_label and not p_label:
-        return None
-    if b_label and p_label:
-        return f"مبنى {building} — {b_label} / {p_label}"
-    return b_label or p_label
+    # Just the building's own label (e.g. "حسابات وتجارة") — no "مبنى E"
+    # prefix and no program name; the specific program isn't printed on
+    # the ticket, only which building/queue it belongs to.
+    return building_label(building) if building else None
 
 
 class TicketImageError(Exception):
