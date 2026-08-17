@@ -51,7 +51,13 @@ from app.sync.supabase_client import SupabaseSyncClient, SupabaseUnavailable
 from app.sync.sync_manager import SyncManager
 from app.ui.building_dialog import ask_for_building
 from app.ui.certificate_dialog import ask_for_program
+from app.ui.print_mode_dialog import PREPRINTED, PRINTER, ask_for_print_mode
 from app.ui.styles import STYLESHEET
+
+# How long an employee has to undo a just-pulled number in "preprinted"
+# mode (config.print_mode == PREPRINTED) before it's treated as issued.
+# See _print_next / _start_preprinted_undo_window.
+PREPRINTED_UNDO_SECONDS = 5
 
 logger = get_logger("ui")
 
@@ -119,6 +125,23 @@ class MainWindow(QMainWindow):
             except Exception:
                 logger.exception("Failed to save building selection to config.yaml")
         self._update_building_label()
+
+        # Same reasoning as the building prompt above: ask once, up
+        # front, non-cancellably, if config.yaml doesn't already say
+        # how this device issues numbers.
+        if not self.config.print_mode:
+            chosen_mode = ask_for_print_mode(self, allow_cancel=False)
+            self.config.print_mode = chosen_mode
+            try:
+                save_config(self.config)
+            except Exception:
+                logger.exception("Failed to save print mode selection to config.yaml")
+        self._update_print_mode_label()
+
+        self._preprinted_ticket = None
+        self._preprinted_seconds_left = 0
+        self._preprinted_countdown_timer = QTimer(self)
+        self._preprinted_countdown_timer.timeout.connect(self._on_preprinted_countdown_tick)
 
         db_path = config.resolve_path(config.database.path)
         self.db = Database(db_path)
@@ -198,6 +221,21 @@ class MainWindow(QMainWindow):
         building_row.addWidget(self.change_building_button)
         layout.addLayout(building_row)
 
+        # Print-mode banner: same idea as the building banner above —
+        # always visible so it's obvious whether "طباعة" actually
+        # prints or just pulls the next number, and easy to fix if a
+        # machine was set up wrong.
+        print_mode_row = QHBoxLayout()
+        self.print_mode_label = QLabel()
+        self.print_mode_label.setObjectName("buildingLabel")
+        self.print_mode_label.setAlignment(Qt.AlignCenter)
+        print_mode_row.addWidget(self.print_mode_label, 1)
+        self.change_print_mode_button = QPushButton("تغيير طريقة الطباعة")
+        self.change_print_mode_button.setObjectName("changeBuildingButton")
+        self.change_print_mode_button.clicked.connect(self._on_change_print_mode_clicked)
+        print_mode_row.addWidget(self.change_print_mode_button)
+        layout.addLayout(print_mode_row)
+
         self.date_label = QLabel()
         self.date_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.date_label)
@@ -221,6 +259,24 @@ class MainWindow(QMainWindow):
         wl.addLayout(wrow)
         layout.addWidget(self.warning_frame)
         self.warning_frame.hide()
+
+        # Preprinted-mode undo banner: shown for a few seconds right
+        # after pulling a number in "preprinted" mode (config.print_mode
+        # == PREPRINTED), where there's no printer failure to catch a
+        # mis-tap the way there is in printer mode — see _print_next.
+        self.preprinted_undo_frame = QFrame()
+        self.preprinted_undo_frame.setObjectName("warningBanner")
+        pl = QVBoxLayout(self.preprinted_undo_frame)
+        self.preprinted_undo_label = QLabel()
+        self.preprinted_undo_label.setWordWrap(True)
+        self.preprinted_undo_label.setAlignment(Qt.AlignCenter)
+        pl.addWidget(self.preprinted_undo_label)
+        self.preprinted_undo_button = QPushButton("تراجع عن هذا الرقم")
+        self.preprinted_undo_button.setObjectName("cancelButton")
+        self.preprinted_undo_button.clicked.connect(self._on_preprinted_undo_clicked)
+        pl.addWidget(self.preprinted_undo_button)
+        layout.addWidget(self.preprinted_undo_frame)
+        self.preprinted_undo_frame.hide()
 
         # Current number card
         current_card = self._card()
@@ -385,6 +441,16 @@ class MainWindow(QMainWindow):
         else:
             self.building_label.setText(f"مبنى {building.value} — {building.label}")
 
+    def _update_print_mode_label(self) -> None:
+        if self.config.print_mode == PREPRINTED:
+            self.print_mode_label.setText("وضع الطباعة: أرقام مطبوعة جاهزة")
+            self.print_button.setText("سحب الرقم التالي")
+        elif self.config.print_mode == PRINTER:
+            self.print_mode_label.setText("وضع الطباعة: طابعة")
+            self.print_button.setText("طباعة التذكرة التالية")
+        else:
+            self.print_mode_label.setText("لم يتم اختيار طريقة طباعة")
+
     def _refresh_all(self) -> None:
         # ⁦/⁩ (LTR isolate) keep "2026-08-10" from being
         # visually reordered by the bidi algorithm inside the
@@ -445,6 +511,15 @@ class MainWindow(QMainWindow):
             self.print_button.setEnabled(True)
             self.test_button.setEnabled(True)
 
+        # A number pulled in preprinted mode is still inside its
+        # undo window — keep both buttons locked no matter what
+        # triggered this refresh (day rollover, printer refresh, etc.),
+        # so a second number can't be pulled before the first is
+        # confirmed or undone. See _start_preprinted_undo_window.
+        if self._preprinted_ticket is not None:
+            self.print_button.setEnabled(False)
+            self.test_button.setEnabled(False)
+
     def _append_log(self, line: str) -> None:
         self.log_panel.append(line)
 
@@ -491,6 +566,13 @@ class MainWindow(QMainWindow):
         self._refresh_all()
 
     def _on_change_building_clicked(self) -> None:
+        if self._preprinted_ticket is not None:
+            QMessageBox.information(
+                self,
+                "تغيير المبنى",
+                "في رقم لسه في فترة التراجع — استنى ثواني أو دوس تراجع الأول.",
+            )
+            return
         chosen = ask_for_building(self, allow_cancel=True)
         if chosen is None or chosen == self.config.building:
             return
@@ -514,6 +596,25 @@ class MainWindow(QMainWindow):
         # A stale reconciliation check against the old building's
         # sequence would be meaningless now — re-run it for the new one.
         QTimer.singleShot(100, self._reconcile_with_server)
+
+    def _on_change_print_mode_clicked(self) -> None:
+        if self._preprinted_ticket is not None:
+            QMessageBox.information(
+                self,
+                "تغيير طريقة الطباعة",
+                "في رقم لسه في فترة التراجع — استنى ثواني أو دوس تراجع الأول.",
+            )
+            return
+        chosen = ask_for_print_mode(self, allow_cancel=True)
+        if chosen is None or chosen == self.config.print_mode:
+            return
+        self.config.print_mode = chosen
+        try:
+            save_config(self.config)
+        except Exception:
+            logger.exception("Failed to save print mode selection to config.yaml")
+        self._update_print_mode_label()
+        logger.info("🖨️ Print mode changed to: %s", chosen)
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -599,10 +700,60 @@ class MainWindow(QMainWindow):
             logger.info(
                 "Reserved ticket #%s (%s)", ticket.ticket_number, program_label(program)
             )
+            if not test and self.config.print_mode == PREPRINTED:
+                # No printer involved: the paper ticket already exists,
+                # so the number is issued immediately — the only risk is
+                # a mis-tap, which the undo window below covers instead
+                # of a print failure the way printer mode does.
+                self.ticket_service.mark_printed(ticket.id, "PREPRINTED")
+                logger.info("📝 Ticket #%s issued (preprinted mode)", ticket.ticket_number)
+                self._start_preprinted_undo_window(ticket)
+                return
             self._refresh_all()
             self._do_print(ticket, test=test)
         finally:
             self._refresh_all()
+
+    def _start_preprinted_undo_window(self, ticket) -> None:
+        self._preprinted_ticket = ticket
+        self._preprinted_seconds_left = PREPRINTED_UNDO_SECONDS
+        self.preprinted_undo_frame.show()
+        self._render_preprinted_undo_label()
+        self._preprinted_countdown_timer.start(1000)
+        self._refresh_all()
+
+    def _render_preprinted_undo_label(self) -> None:
+        self.preprinted_undo_label.setText(
+            f"التذكرة رقم {self._preprinted_ticket.ticket_number} — "
+            f"تقدر تتراجع خلال {self._preprinted_seconds_left} ثانية"
+        )
+
+    def _on_preprinted_countdown_tick(self) -> None:
+        self._preprinted_seconds_left -= 1
+        if self._preprinted_seconds_left <= 0:
+            self._finalize_preprinted_ticket()
+            return
+        self._render_preprinted_undo_label()
+
+    def _finalize_preprinted_ticket(self) -> None:
+        self._preprinted_countdown_timer.stop()
+        ticket = self._preprinted_ticket
+        self._preprinted_ticket = None
+        self.preprinted_undo_frame.hide()
+        if ticket is not None and self.sync_manager is not None:
+            self.sync_manager.trigger()
+        self._refresh_all()
+
+    def _on_preprinted_undo_clicked(self) -> None:
+        ticket = self._preprinted_ticket
+        if ticket is None:
+            return
+        self._preprinted_countdown_timer.stop()
+        self._preprinted_ticket = None
+        self.preprinted_undo_frame.hide()
+        self.ticket_service.cancel_ticket(ticket.id, "Undone by employee (preprinted mode)")
+        logger.warning("↩️ Ticket #%s undone (preprinted mode) — number skipped", ticket.ticket_number)
+        self._refresh_all()
 
     def _on_retry_clicked(self) -> None:
         # Test-mode prints can't fail (no printer/template call to

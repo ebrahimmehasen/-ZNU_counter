@@ -44,3 +44,10 @@ web:
 # answer back here; only set this manually if you're pre-configuring a
 # machine image before deployment.
 building: ""
+
+# How this device issues numbers: "printer" (renders and sends each
+# ticket to a real printer) or "preprinted" (numbered tickets already
+# exist on paper — the app only tracks which number is next, with a
+# 5-second undo window after each number in case of a mis-tap). Leave
+# empty and the app will ask on first run and save the answer back here.
+print_mode: ""

@@ -92,6 +92,12 @@ class AppConfig:
     # One install == one building, by design (see PLAN_MULTI_BUILDING.md)
     # — this is a single value, not a list.
     building: str = ""
+    # "printer" (render + send to a real printer) or "preprinted" (the
+    # employee already has numbered tickets on paper; the app just
+    # tracks which number is next). Empty until chosen on first run —
+    # see ui/print_mode_dialog.py. Same per-machine-identity category
+    # as `building` above, not a secret.
+    print_mode: str = ""
     # Where this config was loaded from — save_config() writes back here.
     # Not read from the YAML file itself.
     config_path: Path = field(default=None)
@@ -132,6 +138,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         logging=LoggingConfig(**raw.get("logging", {})),
         web=WebConfig(**raw.get("web", {})),
         building=raw.get("building", "") or "",
+        print_mode=raw.get("print_mode", "") or "",
     )
     cfg.supabase = SupabaseConfig(
         url=os.environ.get("SUPABASE_URL", ""),
@@ -165,6 +172,7 @@ def save_config(cfg: AppConfig) -> None:
             "next_numbers_count": cfg.web.next_numbers_count,
         },
         "building": cfg.building,
+        "print_mode": cfg.print_mode,
     }
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
