@@ -1,3 +1,12 @@
+-- Historical snapshot: the multi-building migration (2026).
+--
+-- This file is identical to supabase/schema.sql as of the migration
+-- that added buildings B/C/E/F and replaced certificate_type with
+-- program. Kept here as a dated record, same convention as the other
+-- migration_*.sql files in this folder — schema.sql itself is the one
+-- file you actually need to run (it's fully idempotent: safe to run
+-- against a fresh database or an existing one).
+--
 -- Supabase schema: mirror + queue-calling coordination.
 --
 -- The local SQLite database (desktop app) remains the source of truth

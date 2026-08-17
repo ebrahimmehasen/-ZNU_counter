@@ -84,6 +84,14 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    # Which of the four buildings (B/C/E/F — see core/certificates.py's
+    # BUILDINGS list) this specific desktop install serves. Empty until
+    # the employee picks one on first run (see ui/building_dialog.py);
+    # persisted here (not .env) because it's a per-machine identity
+    # setting, not a secret, same category as the printer name below.
+    # One install == one building, by design (see PLAN_MULTI_BUILDING.md)
+    # — this is a single value, not a list.
+    building: str = ""
     # Where this config was loaded from — save_config() writes back here.
     # Not read from the YAML file itself.
     config_path: Path = field(default=None)
@@ -123,6 +131,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         sync=SyncConfig(**raw.get("sync", {})),
         logging=LoggingConfig(**raw.get("logging", {})),
         web=WebConfig(**raw.get("web", {})),
+        building=raw.get("building", "") or "",
     )
     cfg.supabase = SupabaseConfig(
         url=os.environ.get("SUPABASE_URL", ""),
@@ -136,8 +145,9 @@ def save_config(cfg: AppConfig) -> None:
     """Persists the (non-secret) settings back to config.yaml — used by
     the printer picker in the UI so a chosen printer survives restarts
     instead of reverting to whatever Windows currently calls the
-    default printer. Secrets (Supabase URL/key) are never written here;
-    they stay in .env."""
+    default printer, and by the building picker (ui/building_dialog.py)
+    so this device's building selection survives restarts too. Secrets
+    (Supabase URL/key) are never written here; they stay in .env."""
     path = cfg.config_path or (PROJECT_ROOT / "config" / "config.yaml")
     data = {
         "printer": {"name": cfg.printer.name, "copies": cfg.printer.copies},
@@ -154,6 +164,7 @@ def save_config(cfg: AppConfig) -> None:
             "port": cfg.web.port,
             "next_numbers_count": cfg.web.next_numbers_count,
         },
+        "building": cfg.building,
     }
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)

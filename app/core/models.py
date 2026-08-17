@@ -34,8 +34,8 @@ class TicketStatus:
     CANCELLED = "CANCELLED"        # employee explicitly abandoned this number
     CALLED = "CALLED"              # called by the first reviewer, at their counter
 
-    # --- certificate/admission stage (written by Supabase RPCs) ------
-    WAITING_FOR_ADMISSION = "WAITING_FOR_ADMISSION"  # first review done; queued by certificate
+    # --- admission stage (written by Supabase RPCs) -------------------
+    WAITING_FOR_ADMISSION = "WAITING_FOR_ADMISSION"  # first review done; queued by program
     CALLED_BY_ADMISSION = "CALLED_BY_ADMISSION"      # claimed by a student-affairs employee
     COMPLETED = "COMPLETED"                          # admission finished with this student
 
@@ -87,7 +87,8 @@ class Ticket:
     updated_at: str
     counter_id: Optional[int] = None
     called_at: Optional[str] = None
-    certificate_type: Optional[str] = None
+    program: Optional[str] = None
+    building: Optional[str] = None
 
     @classmethod
     def from_row(cls, row) -> "Ticket":

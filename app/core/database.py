@@ -17,6 +17,17 @@ Design choices that serve those goals:
     the local auto-increment id. That uuid is the idempotency key used
     when upserting into Supabase, so retried/duplicate sync attempts
     never create duplicate cloud rows.
+
+Multi-building note: this file's own numbering scope (session_id, i.e.
+one business day) never needed a `building` column to stay correct,
+because each desktop install serves exactly one physical building (see
+app/config.py's `building` setting) — its whole local database only
+ever holds that one building's tickets, so MAX(ticket_number) WHERE
+session_id=... is inherently building-scoped already. `building` is
+still stored per-ticket (alongside `program`, which replaces the old
+`certificate_type`) purely so every row carries everything it needs to
+sync to Supabase correctly, without the sync code having to reach back
+into config for it.
 """
 from __future__ import annotations
 
@@ -103,19 +114,35 @@ class Database:
     def _migrate(self) -> None:
         """Additive, idempotent column migrations for databases created by
         an earlier version of the schema (e.g. Phase 1 installs upgrading
-        to Phase 2's queue-calling columns). Only ADD COLUMN — never drops
-        or renames anything, so old data is never at risk."""
+        to Phase 2's queue-calling columns, or single-building installs
+        upgrading to the multi-building schema). Only ADD/RENAME COLUMN —
+        never drops anything, so old data is never at risk."""
         existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(tickets)")}
         if "counter_id" not in existing:
             self._conn.execute("ALTER TABLE tickets ADD COLUMN counter_id INTEGER REFERENCES counters(id)")
         if "called_at" not in existing:
             self._conn.execute("ALTER TABLE tickets ADD COLUMN called_at TEXT")
-        # Which certificate the student is here for, chosen at print
-        # time (see ui/certificate_dialog.py). Nullable on purpose:
-        # tickets printed before this column existed keep working and
-        # simply have no certificate queue to move into.
-        if "certificate_type" not in existing:
-            self._conn.execute("ALTER TABLE tickets ADD COLUMN certificate_type TEXT")
+
+        # certificate_type -> program: this desktop install now stamps
+        # every ticket with the academic program chosen at print time
+        # (see ui/certificate_dialog.ask_for_program), not a certificate.
+        # Rename rather than add-a-new-column so any tickets already
+        # printed under the old column keep their value instead of
+        # being orphaned. SQLite has supported RENAME COLUMN since
+        # 3.25 (2018), well within PyInstaller's bundled sqlite3.
+        if "certificate_type" in existing and "program" not in existing:
+            self._conn.execute("ALTER TABLE tickets RENAME COLUMN certificate_type TO program")
+            existing.discard("certificate_type")
+            existing.add("program")
+        if "program" not in existing:
+            self._conn.execute("ALTER TABLE tickets ADD COLUMN program TEXT")
+
+        # Which of the four buildings (B/C/E/F) this ticket was printed
+        # under — see app/config.py's `building` setting and
+        # app/core/certificates.py's BUILDINGS list. Nullable so any
+        # tickets printed before this feature existed keep working.
+        if "building" not in existing:
+            self._conn.execute("ALTER TABLE tickets ADD COLUMN building TEXT")
 
     def _ensure_device_id(self) -> None:
         row = self._conn.execute(

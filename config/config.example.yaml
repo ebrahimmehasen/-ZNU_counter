@@ -37,3 +37,10 @@ web:
   host: "0.0.0.0"
   port: 8000
   next_numbers_count: 5
+
+# Which building this printer PC serves — one of "B", "C", "E", "F"
+# (see app/core/certificates.py's BUILDINGS list for what each one
+# means). Leave empty and the app will ask on first run and save the
+# answer back here; only set this manually if you're pre-configuring a
+# machine image before deployment.
+building: ""

@@ -26,6 +26,11 @@ sequence of operations is deliberate:
 Sequential numbers are computed as MAX(ticket_number) for the session,
 which includes RESERVED/PRINT_FAILED/CANCELLED rows — so numbering
 only ever moves forward, regardless of prior failures.
+
+Multi-building note: numbering stays scoped to `session_id` only (one
+sequence per business day), same as before the multi-building change —
+see database.py's module docstring for why that's still correct once
+each desktop install is pinned to exactly one building.
 """
 from __future__ import annotations
 
@@ -48,13 +53,22 @@ class TicketService:
 
     # ---- ticket numbering / printing lifecycle -------------------------
 
-    def reserve_next_ticket(self, session_id: int, certificate_type: Optional[str] = None) -> Ticket:
-        """`certificate_type` is the stable id from core/certificates.py,
-        chosen by the employee before printing. It's stored at
-        reservation time (not after a successful print) so a ticket that
-        fails to print and is retried keeps the certificate it was
-        issued for, and so the value can never be lost between the two
-        steps. Optional to keep every existing caller/test working."""
+    def reserve_next_ticket(
+        self,
+        session_id: int,
+        building: Optional[str] = None,
+        program: Optional[str] = None,
+    ) -> Ticket:
+        """`building` is this device's configured building (see
+        app/config.py) and `program` is the stable id from
+        core/certificates.py's BUILDINGS list, chosen by the employee
+        before printing (or implied automatically for a
+        single-program building — see ui/certificate_dialog.py). Both
+        are stored at reservation time (not after a successful print)
+        so a ticket that fails to print and is retried keeps the same
+        building/program it was issued for, and so the values can
+        never be lost between the two steps. Optional to keep every
+        existing caller/test working."""
         with self.db.transaction() as conn:
             row = conn.execute(
                 "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
@@ -66,8 +80,8 @@ class TicketService:
             cur = conn.execute(
                 """INSERT INTO tickets
                    (uuid, session_id, ticket_number, status, print_attempts,
-                    sync_status, device_id, certificate_type, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
+                    sync_status, device_id, building, program, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
                 (
                     ticket_uuid,
                     session_id,
@@ -75,13 +89,16 @@ class TicketService:
                     TicketStatus.RESERVED,
                     SyncStatus.PENDING_SYNC,
                     self.db.device_id,
-                    certificate_type,
+                    building,
+                    program,
                     now,
                     now,
                 ),
             )
             ticket_id = cur.lastrowid
-            self._log_event(conn, ticket_id, "RESERVED", now, {"certificate_type": certificate_type})
+            self._log_event(
+                conn, ticket_id, "RESERVED", now, {"building": building, "program": program}
+            )
             row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
         return Ticket.from_row(row)
 
@@ -227,7 +244,7 @@ class TicketService:
         ).fetchone()
         return {
             "current_number": last_printed["ticket_number"] if last_printed else None,
-            "current_certificate": last_printed["certificate_type"] if last_printed else None,
+            "current_program": last_printed["program"] if last_printed else None,
             "next_number": max_row["m"] + 1,
             "today_count": count_row["c"],
             "last_printed_at": last_printed["printed_at"] if last_printed else None,

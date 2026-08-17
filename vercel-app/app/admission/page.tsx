@@ -2,11 +2,15 @@
 
 // Student Affairs / Admission — the second review stage.
 //
-// Two screens in one route: pick which certificate queues you handle,
-// then work them. The selection is kept in localStorage (same pattern
-// as the counter number on /call) so a mid-shift refresh or an
-// accidental back-navigation drops the employee straight back into
-// their dashboard instead of the setup screen.
+// Scoped to one building (chosen once via BuildingPicker, remembered
+// per browser — same pattern as /call). Within that building: pick
+// which program queues you handle, then work them. The selection is
+// kept in localStorage (same pattern as the counter number on /call)
+// so a mid-shift refresh or an accidental back-navigation drops the
+// employee straight back into their dashboard instead of the setup
+// screen. A building with only one program (currently just C — بشري)
+// skips the selection screen entirely — there is nothing to choose,
+// same rule the desktop app's print-time picker follows.
 //
 // Same two-step shape as /call: "التالي" only claims the next student
 // (admission_claim_next). While serving them, the SAME button becomes
@@ -16,22 +20,25 @@
 // separate actions, not one forced click.
 //
 // Everything that matters for correctness happens in those RPCs, not
-// here: which queues an employee may call is enforced server-side, and
-// each claim/finish is a locked single-row update so two employees
-// pressing "التالي" together can never receive the same student. This
+// here: which queues an employee may call, and which building, are
+// enforced server-side (see p_building/p_programs in
+// supabase/schema.sql) — a two employees pressing "التالي" together
+// can never receive the same student, and a device mis-set to the
+// wrong building can never claim another building's students. This
 // page only renders what the RPCs return.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
-import { CERTIFICATE_TYPES, certificateLabel } from "@/lib/certificates";
+import { buildingLabel, clearSelectedBuilding, getBuilding, getSelectedBuilding, programLabel, setSelectedBuilding } from "@/lib/buildings";
+import BuildingPicker from "@/components/BuildingPicker";
 import { announceAdmissionTicket, speechAvailable, unlockSpeech } from "@/lib/speech";
 
-const SELECTION_STORAGE_KEY = "admission_certificate_types";
+const SELECTION_STORAGE_KEY = "admission_programs";
 const DESK_STORAGE_KEY = "admission_desk_id";
 
 type NowServing = {
   ticketNumber: number;
-  certificateType: string | null;
+  program: string | null;
   calledAt: string;
 };
 
@@ -56,6 +63,8 @@ function loadOrCreateDeskId(): string {
 }
 
 export default function AdmissionPage() {
+  // null = still reading localStorage; "" = read, nothing chosen yet.
+  const [building, setBuilding] = useState<string | null>(null);
   // null = still reading localStorage; [] = read, nothing chosen yet.
   // Distinguishing them stops the setup screen flashing on every load.
   const [selected, setSelected] = useState<string[] | null>(null);
@@ -64,7 +73,7 @@ export default function AdmissionPage() {
   const [deskId, setDeskId] = useState("");
   const [businessDate, setBusinessDate] = useState("");
 
-  const [waitingByType, setWaitingByType] = useState<Record<string, number>>({});
+  const [waitingByProgram, setWaitingByProgram] = useState<Record<string, number>>({});
   const [nowServing, setNowServing] = useState<NowServing | null>(null);
   const [outcome, setOutcome] = useState<Outcome>(null);
   const [busy, setBusy] = useState(false);
@@ -79,33 +88,74 @@ export default function AdmissionPage() {
   // the server-rendered shell, and todayBusinessDate() reads the local
   // clock — computing any of them in the first render breaks hydration.
   useEffect(() => {
+    const b = getSelectedBuilding();
+    setBuilding(b);
     setBusinessDate(todayBusinessDate());
     setDeskId(loadOrCreateDeskId());
     setSoundAvailable(speechAvailable());
+    if (!b) return; // nothing to load yet — BuildingPicker comes first
+
+    loadSelectionForBuilding(b);
+  }, []);
+
+  function loadSelectionForBuilding(b: string) {
+    const buildingInfo = getBuilding(b);
+    const programs = buildingInfo?.programs ?? [];
+
+    // A single-program building (C — بشري) never needs the selection
+    // screen: there is exactly one legal queue, so start on it
+    // directly, same rule the desktop app's print-time picker follows.
+    if (buildingInfo && !buildingInfo.askOnPrint && programs.length === 1) {
+      const only = [programs[0].value];
+      setSelected(only);
+      setDraft(only);
+      setStarted(true);
+      return;
+    }
 
     const saved = localStorage.getItem(SELECTION_STORAGE_KEY);
     const parsed: string[] = saved ? JSON.parse(saved) : [];
-    // Drop anything no longer in the canonical list, so a removed
-    // certificate can't leave an employee holding a dead queue.
-    const valid = parsed.filter((v) => CERTIFICATE_TYPES.some((c) => c.value === v));
+    // Drop anything not in THIS building's program list — switching
+    // buildings must never leave an employee holding another
+    // building's queue selection.
+    const valid = parsed.filter((v) => programs.some((p) => p.value === v));
     setSelected(valid);
     setDraft(valid);
     setStarted(valid.length > 0);
-  }, []);
+  }
+
+  function chooseBuilding(value: string) {
+    setSelectedBuilding(value);
+    setBuilding(value);
+    loadSelectionForBuilding(value);
+  }
+
+  function changeBuilding() {
+    clearSelectedBuilding();
+    setBuilding("");
+    setSelected(null);
+    setStarted(false);
+    setOutcome(null);
+    setNowServing(null);
+  }
+
+  const buildingPrograms = useMemo(() => getBuilding(building || undefined)?.programs ?? [], [building]);
 
   const refresh = useCallback(async () => {
-    if (!businessDate || !selected || selected.length === 0) return;
+    if (!building || !businessDate || !selected || selected.length === 0) return;
     try {
       const [{ data: waitingRows, error: waitingError }, { data: servingRows }] = await Promise.all([
         supabase
           .from("tickets")
-          .select("certificate_type")
+          .select("program")
+          .eq("building", building)
           .eq("business_date", businessDate)
           .eq("status", "WAITING_FOR_ADMISSION")
-          .in("certificate_type", selected),
+          .in("program", selected),
         supabase
           .from("tickets")
-          .select("ticket_number, certificate_type, admission_called_at")
+          .select("ticket_number, program, admission_called_at")
+          .eq("building", building)
           .eq("business_date", businessDate)
           .eq("status", "CALLED_BY_ADMISSION")
           .eq("admission_desk", deskId)
@@ -117,9 +167,9 @@ export default function AdmissionPage() {
       const counts: Record<string, number> = {};
       for (const value of selected) counts[value] = 0;
       for (const row of waitingRows || []) {
-        if (row.certificate_type) counts[row.certificate_type] = (counts[row.certificate_type] ?? 0) + 1;
+        if (row.program) counts[row.program] = (counts[row.program] ?? 0) + 1;
       }
-      setWaitingByType(counts);
+      setWaitingByProgram(counts);
 
       // Re-derived from the server rather than kept only in React
       // state, so refreshing the page mid-review still shows the
@@ -129,7 +179,7 @@ export default function AdmissionPage() {
         serving
           ? {
               ticketNumber: serving.ticket_number,
-              certificateType: serving.certificate_type,
+              program: serving.program,
               calledAt: serving.admission_called_at,
             }
           : null
@@ -138,19 +188,19 @@ export default function AdmissionPage() {
     } catch {
       setOffline(true);
     }
-  }, [businessDate, selected, deskId]);
+  }, [building, businessDate, selected, deskId]);
 
   // Live counts: Supabase Realtime for the instant push, plus the same
   // 5s poll the other screens keep as a safety net for a missed event.
   useEffect(() => {
-    if (!started || !businessDate || !selected || selected.length === 0) return;
+    if (!started || !building || !businessDate || !selected || selected.length === 0) return;
     refresh();
 
     const channel = supabase
-      .channel("admission-queues")
+      .channel(`admission-queues-${building}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "tickets", filter: `business_date=eq.${businessDate}` },
+        { event: "*", schema: "public", table: "tickets", filter: `building=eq.${building}` },
         () => refresh()
       )
       .subscribe();
@@ -160,11 +210,11 @@ export default function AdmissionPage() {
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  }, [refresh, started, businessDate, selected]);
+  }, [refresh, started, building, businessDate, selected]);
 
   const totalWaiting = useMemo(
-    () => Object.values(waitingByType).reduce((sum, n) => sum + n, 0),
-    [waitingByType]
+    () => Object.values(waitingByProgram).reduce((sum, n) => sum + n, 0),
+    [waitingByProgram]
   );
 
   function toggleDraft(value: string) {
@@ -188,14 +238,15 @@ export default function AdmissionPage() {
   }
 
   async function claimNext() {
-    if (!selected || selected.length === 0) return;
+    if (!building || !selected || selected.length === 0) return;
     setBusy(true);
     setOutcome(null);
     unlockSpeech();
     try {
       const { data, error } = await supabase.rpc("admission_claim_next", {
+        p_building: building,
         p_business_date: businessDate,
-        p_certificate_types: selected,
+        p_programs: selected,
         p_desk: deskId,
       });
       if (error) throw error;
@@ -207,13 +258,13 @@ export default function AdmissionPage() {
       } else {
         const called: NowServing = {
           ticketNumber: row.out_ticket_number,
-          certificateType: row.out_certificate_type,
+          program: row.out_program,
           calledAt: row.out_called_at,
         };
         setNowServing(called);
         if (announcedRef.current !== called.calledAt) {
           announcedRef.current = called.calledAt;
-          announceAdmissionTicket(called.ticketNumber, certificateLabel(called.certificateType));
+          announceAdmissionTicket(called.ticketNumber, programLabel(called.program));
         }
       }
       refresh();
@@ -228,11 +279,12 @@ export default function AdmissionPage() {
   }
 
   async function finishReview() {
-    if (!nowServing) return;
+    if (!building || !nowServing) return;
     setBusy(true);
     setOutcome(null);
     try {
       const { data, error } = await supabase.rpc("admission_finish_review", {
+        p_building: building,
         p_business_date: businessDate,
         p_desk: deskId,
       });
@@ -252,25 +304,35 @@ export default function AdmissionPage() {
     }
   }
 
-  if (selected === null) {
+  if (building === null || selected === null) {
     return <div className="min-h-screen bg-slate-100" />; // pre-hydration blank, no flash
+  }
+
+  if (!building) {
+    return <BuildingPicker onSelect={chooseBuilding} />;
   }
 
   if (!started) {
     return (
       <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col items-center px-4 py-8 gap-5">
         <header className="text-center">
+          <div className="text-xs text-slate-500 mb-1">
+            مبنى {building} — {buildingLabel(building)}{" "}
+            <button onClick={changeBuilding} className="underline hover:text-blue-700 ms-1">
+              (تغيير)
+            </button>
+          </div>
           <h1 className="text-xl font-extrabold text-blue-900">شؤون الطلاب — القبول</h1>
-          <p className="text-sm text-slate-500 mt-1">اختر الشهادات التي تريد مراجعتها</p>
+          <p className="text-sm text-slate-500 mt-1">اختر البرامج التي تريد مراجعتها</p>
         </header>
 
         <main className="w-full max-w-2xl flex flex-col gap-2">
-          {CERTIFICATE_TYPES.map((cert) => {
-            const checked = draft.includes(cert.value);
+          {buildingPrograms.map((program) => {
+            const checked = draft.includes(program.value);
             return (
               <button
-                key={cert.value}
-                onClick={() => toggleDraft(cert.value)}
+                key={program.value}
+                onClick={() => toggleDraft(program.value)}
                 aria-pressed={checked}
                 className={`flex items-center gap-3 rounded-xl border-2 px-4 py-4 text-right transition-colors ${
                   checked
@@ -285,7 +347,7 @@ export default function AdmissionPage() {
                 >
                   {checked ? "✓" : ""}
                 </span>
-                <span className="font-bold">{cert.label}</span>
+                <span className="font-bold">{program.label}</span>
               </button>
             );
           })}
@@ -296,7 +358,7 @@ export default function AdmissionPage() {
           disabled={draft.length === 0}
           className="w-full max-w-2xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-extrabold text-lg rounded-xl py-5"
         >
-          {draft.length === 0 ? "اختر شهادة واحدة على الأقل" : `ابدأ (${draft.length})`}
+          {draft.length === 0 ? "اختر برنامج واحد على الأقل" : `ابدأ (${draft.length})`}
         </button>
       </div>
     );
@@ -305,12 +367,20 @@ export default function AdmissionPage() {
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col items-center px-4 py-8 gap-5">
       <header className="text-center">
+        <div className="text-xs text-slate-500 mb-1">
+          مبنى {building} — {buildingLabel(building)}{" "}
+          <button onClick={changeBuilding} className="underline hover:text-blue-700 ms-1">
+            (تغيير)
+          </button>
+        </div>
         <h1 className="text-xl font-extrabold text-blue-900">شؤون الطلاب — القبول</h1>
         <div className="text-xs text-slate-500 mt-1">
           {businessDate}
-          <button onClick={changeSelection} className="underline hover:text-blue-700 ms-2">
-            (تغيير الشهادات)
-          </button>
+          {buildingPrograms.length > 1 && (
+            <button onClick={changeSelection} className="underline hover:text-blue-700 ms-2">
+              (تغيير البرامج)
+            </button>
+          )}
         </div>
       </header>
 
@@ -322,7 +392,7 @@ export default function AdmissionPage() {
           <>
             <div className="text-7xl font-extrabold text-slate-900 py-2">{nowServing.ticketNumber}</div>
             <div className="text-lg font-bold text-blue-800">
-              {certificateLabel(nowServing.certificateType)}
+              {programLabel(nowServing.program)}
             </div>
           </>
         )}
@@ -360,7 +430,7 @@ export default function AdmissionPage() {
 
       <section className="w-full max-w-md bg-white border border-slate-200 rounded-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-b border-slate-200">
-          <span className="text-sm font-bold text-slate-600">الشهادة</span>
+          <span className="text-sm font-bold text-slate-600">البرنامج</span>
           <span className="text-sm font-bold text-slate-600">في الانتظار</span>
         </div>
         {selected.map((value) => (
@@ -368,13 +438,13 @@ export default function AdmissionPage() {
             key={value}
             className="flex items-center justify-between px-5 py-3 border-b border-slate-100 last:border-b-0"
           >
-            <span className="font-bold text-slate-800">{certificateLabel(value)}</span>
+            <span className="font-bold text-slate-800">{programLabel(value)}</span>
             <span
               className={`text-2xl font-extrabold ${
-                (waitingByType[value] ?? 0) > 0 ? "text-blue-700" : "text-slate-300"
+                (waitingByProgram[value] ?? 0) > 0 ? "text-blue-700" : "text-slate-300"
               }`}
             >
-              {waitingByType[value] ?? 0}
+              {waitingByProgram[value] ?? 0}
             </span>
           </div>
         ))}

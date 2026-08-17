@@ -1,10 +1,18 @@
-"""Phase 1 main window.
+"""Main window.
 
 Everything the employee needs is on one screen: current/next number,
 today's count, printer + sync status, the print button, and a plain
 log so problems are visible without opening a file. See module
 docstrings in core/ticket_service.py and printing/printer_service.py
 for the reliability logic this window drives.
+
+Multi-building: this window (and the whole desktop install it belongs
+to) is pinned to exactly one of the four buildings (B/C/E/F) via
+config.building — see app/config.py and ui/building_dialog.py. The
+building is chosen once on first run and shown at all times in the
+header so an employee glancing at the screen can always tell which
+building's queue they're printing for; changing it is a deliberate,
+occasional action via the "تغيير المبنى" button, never asked per-ticket.
 """
 from __future__ import annotations
 
@@ -30,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import AppConfig, save_config
-from app.core.certificates import certificate_label
+from app.core.certificates import building_label, get_building, program_label
 from app.core.database import Database
 from app.core.models import TicketStatus
 from app.core.session_service import SessionService
@@ -41,7 +49,8 @@ from app.printing.printer_service import PrintError
 from app.printing.ticket_image import TicketImageError
 from app.sync.supabase_client import SupabaseSyncClient, SupabaseUnavailable
 from app.sync.sync_manager import SyncManager
-from app.ui.certificate_dialog import ask_for_certificate
+from app.ui.building_dialog import ask_for_building
+from app.ui.certificate_dialog import ask_for_program
 from app.ui.styles import STYLESHEET
 
 logger = get_logger("ui")
@@ -98,6 +107,19 @@ class MainWindow(QMainWindow):
         self._log_bridge.message.connect(self._append_log)
         logging.getLogger("queue_system").addHandler(_QtLogHandler(self._log_bridge))
 
+        # This device must have a building before it can reserve/print
+        # a single ticket — every row synced to Supabase needs one (see
+        # supabase/schema.sql's chk_tickets_building_program). Ask now,
+        # non-cancellably, if config.yaml doesn't already have one.
+        if not self.config.building:
+            chosen = ask_for_building(self, allow_cancel=False)
+            self.config.building = chosen
+            try:
+                save_config(self.config)
+            except Exception:
+                logger.exception("Failed to save building selection to config.yaml")
+        self._update_building_label()
+
         db_path = config.resolve_path(config.database.path)
         self.db = Database(db_path)
         self.session_service = SessionService(self.db)
@@ -106,6 +128,7 @@ class MainWindow(QMainWindow):
 
         self.session = self.session_service.get_or_create_today()
         logger.info("Business session ready: %s (id=%s)", self.session.business_date, self.session.id)
+        logger.info("This device serves building %s (%s)", self.config.building, building_label(self.config.building))
 
         self.sync_manager = None
         if config.sync.enabled:
@@ -160,6 +183,21 @@ class MainWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(subtitle)
 
+        # Building banner: always visible, so an employee glancing at
+        # the screen can tell at a glance which building this device is
+        # printing for — and can fix a wrong setup immediately via the
+        # button beside it, rather than discovering it after printing.
+        building_row = QHBoxLayout()
+        self.building_label = QLabel()
+        self.building_label.setObjectName("buildingLabel")
+        self.building_label.setAlignment(Qt.AlignCenter)
+        building_row.addWidget(self.building_label, 1)
+        self.change_building_button = QPushButton("تغيير المبنى")
+        self.change_building_button.setObjectName("changeBuildingButton")
+        self.change_building_button.clicked.connect(self._on_change_building_clicked)
+        building_row.addWidget(self.change_building_button)
+        layout.addLayout(building_row)
+
         self.date_label = QLabel()
         self.date_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.date_label)
@@ -193,16 +231,16 @@ class MainWindow(QMainWindow):
         self.current_number_label = QLabel("—")
         self.current_number_label.setObjectName("bigNumber")
         self.current_number_label.setAlignment(Qt.AlignCenter)
-        # Confirms which certificate the number that just came out of
-        # the printer was issued for — the employee's only chance to
+        # Confirms which program the number that just came out of the
+        # printer was issued for — the employee's only chance to
         # notice a mis-tap before handing the ticket over.
-        self.current_certificate_label = QLabel("")
-        self.current_certificate_label.setObjectName("certificateLabel")
-        self.current_certificate_label.setAlignment(Qt.AlignCenter)
-        self.current_certificate_label.setWordWrap(True)
+        self.current_program_label = QLabel("")
+        self.current_program_label.setObjectName("certificateLabel")
+        self.current_program_label.setAlignment(Qt.AlignCenter)
+        self.current_program_label.setWordWrap(True)
         cc_layout.addWidget(cc_label)
         cc_layout.addWidget(self.current_number_label)
-        cc_layout.addWidget(self.current_certificate_label)
+        cc_layout.addWidget(self.current_program_label)
         layout.addWidget(current_card)
 
         # Next number card
@@ -340,6 +378,13 @@ class MainWindow(QMainWindow):
 
     # ---- refresh / state -------------------------------------------------
 
+    def _update_building_label(self) -> None:
+        building = get_building(self.config.building)
+        if building is None:
+            self.building_label.setText("لم يتم اختيار مبنى")
+        else:
+            self.building_label.setText(f"مبنى {building.value} — {building.label}")
+
     def _refresh_all(self) -> None:
         # ⁦/⁩ (LTR isolate) keep "2026-08-10" from being
         # visually reordered by the bidi algorithm inside the
@@ -351,8 +396,8 @@ class MainWindow(QMainWindow):
         self.current_number_label.setText(
             str(stats["current_number"]) if stats["current_number"] else "—"
         )
-        self.current_certificate_label.setText(
-            certificate_label(stats["current_certificate"]) if stats["current_number"] else ""
+        self.current_program_label.setText(
+            program_label(stats["current_program"]) if stats["current_number"] else ""
         )
         self.next_number_label.setText(str(stats["next_number"]))
         self.today_count_label.setText(str(stats["today_count"]))
@@ -385,13 +430,13 @@ class MainWindow(QMainWindow):
                     f"فشلت طباعة التذكرة رقم {unresolved.ticket_number}: "
                     f"{unresolved.error_message or 'خطأ غير معروف'}"
                 )
-            # The certificate is fixed at reservation time, so a retry
-            # reprints the same number for the same certificate — no
-            # need to ask again, but do show it so the employee can see
-            # what they're about to hand over.
+            # The program is fixed at reservation time, so a retry
+            # reprints the same number for the same program — no need
+            # to ask again, but do show it so the employee can see what
+            # they're about to hand over.
             self.retry_button.setText(
                 f"إعادة طباعة الرقم {unresolved.ticket_number}"
-                f" ({certificate_label(unresolved.certificate_type)})"
+                f" ({program_label(unresolved.program)})"
             )
             self.print_button.setEnabled(False)
             self.test_button.setEnabled(False)
@@ -445,6 +490,31 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to save printer selection to config.yaml")
         self._refresh_all()
 
+    def _on_change_building_clicked(self) -> None:
+        chosen = ask_for_building(self, allow_cancel=True)
+        if chosen is None or chosen == self.config.building:
+            return
+        old = self.config.building
+        self.config.building = chosen
+        try:
+            save_config(self.config)
+        except Exception:
+            logger.exception("Failed to save building selection to config.yaml")
+        self._update_building_label()
+        logger.info(
+            "🏢 Building changed: %s (%s) → %s (%s)",
+            old, building_label(old), chosen, building_label(chosen),
+        )
+        QMessageBox.information(
+            self,
+            "تغيير المبنى",
+            f"تم تغيير المبنى إلى: {building_label(chosen)}.\n"
+            "التذاكر اللي هتتطبع من دلوقتي هتتسجل على المبنى الجديد.",
+        )
+        # A stale reconciliation check against the old building's
+        # sequence would be meaningless now — re-run it for the new one.
+        QTimer.singleShot(100, self._reconcile_with_server)
+
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
             self.showNormal()
@@ -464,16 +534,18 @@ class MainWindow(QMainWindow):
 
     def _reconcile_with_server(self) -> None:
         """Best-effort startup check: if Supabase already has a higher
-        ticket_number for today than this local database does (e.g.
-        queue.db was lost/reset while the cloud mirror had newer synced
-        tickets), raise the local numbering floor to match — see
-        ticket_service.reconcile_sequence_floor. Never blocks/breaks
-        printing: any failure here (offline, misconfigured, whatever)
-        is just logged and otherwise ignored."""
-        if not self.config.supabase.configured:
+        ticket_number for this building/today than this local database
+        does (e.g. queue.db was lost/reset while the cloud mirror had
+        newer synced tickets), raise the local numbering floor to match
+        — see ticket_service.reconcile_sequence_floor. Never blocks/
+        breaks printing: any failure here (offline, misconfigured,
+        whatever) is just logged and otherwise ignored."""
+        if not self.config.supabase.configured or not self.config.building:
             return
         try:
-            remote_max = self.supabase_client.get_max_ticket_number(self.session.business_date)
+            remote_max = self.supabase_client.get_max_ticket_number(
+                self.config.building, self.session.business_date
+            )
             if remote_max is None:
                 return
             marker = self.ticket_service.reconcile_sequence_floor(
@@ -503,24 +575,29 @@ class MainWindow(QMainWindow):
         self._print_next(test=True)
 
     def _print_next(self, test: bool) -> None:
-        # Ask for the certificate BEFORE reserving anything: cancelling
-        # the picker must leave the sequence untouched, so a mis-click
-        # on the print button can never burn a ticket number.
-        certificate_type = ask_for_certificate(
+        # Ask for the program BEFORE reserving anything: cancelling the
+        # picker must leave the sequence untouched, so a mis-click on
+        # the print button can never burn a ticket number. For a
+        # single-program building (C) this returns immediately without
+        # showing any dialog at all — see ask_for_program.
+        program = ask_for_program(
             self,
-            "اختر نوع الشهادة (رقم تجريبي)" if test else "اختر نوع الشهادة",
+            self.config.building,
+            "اختر البرنامج (رقم تجريبي)" if test else None,
         )
-        if certificate_type is None:
-            logger.info("Certificate selection cancelled — no number was reserved")
+        if program is None:
+            logger.info("Program selection cancelled — no number was reserved")
             return
 
         self.error_label.setText("")
         self.print_button.setEnabled(False)
         self.test_button.setEnabled(False)
         try:
-            ticket = self.ticket_service.reserve_next_ticket(self.session.id, certificate_type)
+            ticket = self.ticket_service.reserve_next_ticket(
+                self.session.id, self.config.building, program
+            )
             logger.info(
-                "Reserved ticket #%s (%s)", ticket.ticket_number, certificate_label(certificate_type)
+                "Reserved ticket #%s (%s)", ticket.ticket_number, program_label(program)
             )
             self._refresh_all()
             self._do_print(ticket, test=test)
@@ -564,8 +641,9 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.warning(
             self,
             "إعادة تعيين النظام",
-            f"هل أنت متأكد؟ هذا هيمسح كل تذاكر اليوم ({self.session.business_date}) محليًا "
-            "وعلى السيرفر، ويرجّع الترقيم لرقم 1. الإجراء ده مش رجعة.",
+            f"هل أنت متأكد؟ هذا هيمسح كل تذاكر مبنى {building_label(self.config.building)} "
+            f"اليوم ({self.session.business_date}) محليًا وعلى السيرفر، ويرجّع الترقيم لرقم 1. "
+            "باقي المباني مش هتتأثر. الإجراء ده مش رجعة.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -577,7 +655,9 @@ class MainWindow(QMainWindow):
 
         if self.config.supabase.configured:
             try:
-                self.supabase_client.admin_reset_business_date(self.session.business_date, ADMIN_PASSWORD)
+                self.supabase_client.admin_reset_business_date(
+                    self.config.building, self.session.business_date, ADMIN_PASSWORD
+                )
                 logger.info("🗑️ Admin reset: cleared server tickets for %s", self.session.business_date)
             except SupabaseUnavailable as e:
                 logger.warning("🗑️ Admin reset: server-side reset failed (local reset still applied): %s", e)
@@ -610,6 +690,8 @@ class MainWindow(QMainWindow):
                 ticket.ticket_number,
                 temp_dir,
                 self.config.template.number_padding,
+                building=ticket.building,
+                program=ticket.program,
             )
             printer_service.print_image(
                 composited_path,

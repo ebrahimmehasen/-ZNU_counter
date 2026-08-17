@@ -1,23 +1,29 @@
 "use client";
 
-// At-a-glance statistics for the whole day: where every ticket currently
-// is, how each certificate queue is doing, and how much each counter has
-// served. Read-only — this page never calls anything, it only counts.
+// At-a-glance statistics — for the main supervisor watching ALL FOUR
+// buildings at once, not scoped to one the way /, /call, and
+// /admission are. That's why this page does NOT use BuildingPicker /
+// localStorage the way the other three do: it has its own in-page
+// building filter (buttons below) defaulting to "الكل" (every
+// building), so a supervisor can see the whole picture or drill into
+// one building without ever being forced to pick just one.
 //
-// Everything is derived from one fetch of today's tickets and computed
-// in the browser. That keeps it a single query no matter how many
-// breakdowns are shown, and means every number on screen is guaranteed
-// to come from the same instant rather than from several queries that
-// could disagree with each other mid-refresh.
+// Everything is derived from one fetch of today's (optionally
+// building-filtered) tickets and computed in the browser. That keeps
+// it a single query no matter how many breakdowns are shown, and means
+// every number on screen is guaranteed to come from the same instant
+// rather than from several queries that could disagree with each other
+// mid-refresh.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
-import { CERTIFICATE_TYPES, certificateLabel } from "@/lib/certificates";
+import { BUILDINGS, buildingLabel, getBuilding, programLabel } from "@/lib/buildings";
 
 type Ticket = {
   ticket_number: number;
   status: string;
-  certificate_type: string | null;
+  building: string | null;
+  program: string | null;
   counter_number: number | null;
   called_at: string | null;
 };
@@ -59,10 +65,13 @@ function stageOf(t: Ticket): StageKey | null {
  * whatever was true when it was opened. */
 type Drill = { title: string; match: (t: Ticket) => boolean } | null;
 
+const ALL_BUILDINGS = ""; // buildingFilter value meaning "every building"
+
 export default function ViewPage() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [businessDate, setBusinessDate] = useState("");
-  const [openCounter, setOpenCounter] = useState<number | null>(null);
+  const [buildingFilter, setBuildingFilter] = useState<string>(ALL_BUILDINGS);
+  const [openCounter, setOpenCounter] = useState<string | null>(null); // `${building}-${counterNumber}`
   const [offline, setOffline] = useState(false);
   const [drill, setDrill] = useState<Drill>(null);
 
@@ -73,30 +82,37 @@ export default function ViewPage() {
   const refresh = useCallback(async () => {
     if (!businessDate) return;
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("tickets")
-        .select("ticket_number, status, certificate_type, counter_number, called_at")
+        .select("ticket_number, status, building, program, counter_number, called_at")
         .eq("business_date", businessDate)
         .order("ticket_number", { ascending: true });
+      if (buildingFilter !== ALL_BUILDINGS) {
+        query = query.eq("building", buildingFilter);
+      }
+      const { data, error } = await query;
       if (error) throw error;
       setTickets(data || []);
       setOffline(false);
     } catch {
       setOffline(true);
     }
-  }, [businessDate]);
+  }, [businessDate, buildingFilter]);
 
   useEffect(() => {
     if (!businessDate) return;
     refresh();
 
+    // Filtered by building when one is picked (less noise); when
+    // "الكل" is selected, subscribe to every building's changes for
+    // this business date.
+    const filter =
+      buildingFilter !== ALL_BUILDINGS
+        ? `building=eq.${buildingFilter}`
+        : `business_date=eq.${businessDate}`;
     const channel = supabase
-      .channel("counter-view")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "tickets", filter: `business_date=eq.${businessDate}` },
-        () => refresh()
-      )
+      .channel(`counter-view-${buildingFilter || "all"}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tickets", filter }, () => refresh())
       .subscribe();
 
     const interval = setInterval(refresh, 5000);
@@ -104,7 +120,20 @@ export default function ViewPage() {
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  }, [refresh, businessDate]);
+  }, [refresh, businessDate, buildingFilter]);
+
+  // Which programs to show rows for: just the selected building's, or
+  // every building's (with a "مبنى X" prefix so they're not ambiguous)
+  // when showing all.
+  const programOptions = useMemo(() => {
+    if (buildingFilter !== ALL_BUILDINGS) {
+      const b = getBuilding(buildingFilter);
+      return (b?.programs ?? []).map((p) => ({ value: p.value, label: p.label }));
+    }
+    return BUILDINGS.flatMap((b) =>
+      b.programs.map((p) => ({ value: p.value, label: `${p.label} (مبنى ${b.value})` }))
+    );
+  }, [buildingFilter]);
 
   const stats = useMemo(() => {
     const live = tickets.filter((t) => stageOf(t) !== null);
@@ -114,18 +143,21 @@ export default function ViewPage() {
     };
     for (const t of live) byStage[stageOf(t)!] += 1;
 
-    // Per certificate. Only certificates that actually appeared today are
-    // listed, in the canonical order — a table of 13 mostly-zero rows
+    // Per program. Only programs that actually appeared today are
+    // listed, in the canonical order — a table of mostly-zero rows
     // would bury the ones that matter.
-    const certRows = CERTIFICATE_TYPES.map((c) => c.value)
+    const programRows = programOptions
+      .map((p) => p.value)
       .concat("__none__")
       .map((value) => {
-        const of = live.filter((t) =>
-          value === "__none__" ? !t.certificate_type : t.certificate_type === value
-        );
+        const of = live.filter((t) => (value === "__none__" ? !t.program : t.program === value));
+        const label =
+          value === "__none__"
+            ? "بدون برنامج (تذاكر قديمة)"
+            : programOptions.find((p) => p.value === value)?.label ?? programLabel(value);
         return {
           value,
-          label: value === "__none__" ? "بدون شهادة (تذاكر قديمة)" : certificateLabel(value),
+          label,
           total: of.length,
           waitingAdmission: of.filter((t) => stageOf(t) === "waitingAdmission").length,
           atAdmission: of.filter((t) => stageOf(t) === "atAdmission").length,
@@ -138,29 +170,32 @@ export default function ViewPage() {
       })
       .filter((r) => r.total > 0);
 
-    // Per counter. Counted by counter_number rather than by status:
-    // a ticket keeps the counter that served it after it moves on to
-    // student affairs, so counting only status='CALLED' would make a
-    // counter's total shrink as its students progress.
-    const byCounter = new Map<number, number[]>();
+    // Per counter, per building. Counted by (building, counter_number)
+    // rather than by status: a ticket keeps the counter that served it
+    // after it moves on to student affairs, so counting only
+    // status='CALLED' would make a counter's total shrink as its
+    // students progress. Building is part of the key because counter
+    // numbers are only unique within a building, not across all four.
+    const byCounter = new Map<string, { building: string; counterNumber: number; numbers: number[] }>();
     for (const t of live) {
-      if (t.counter_number == null) continue;
-      const list = byCounter.get(t.counter_number) || [];
-      list.push(t.ticket_number);
-      byCounter.set(t.counter_number, list);
+      if (t.counter_number == null || !t.building) continue;
+      const key = `${t.building}-${t.counter_number}`;
+      const entry = byCounter.get(key) || { building: t.building, counterNumber: t.counter_number, numbers: [] };
+      entry.numbers.push(t.ticket_number);
+      byCounter.set(key, entry);
     }
     const counterRows = [...byCounter.entries()]
-      .map(([counterNumber, numbers]) => ({ counterNumber, numbers }))
-      .sort((a, b) => a.counterNumber - b.counterNumber);
+      .map(([key, v]) => ({ key, ...v }))
+      .sort((a, b) => a.building.localeCompare(b.building) || a.counterNumber - b.counterNumber);
 
     return {
       total: live.length,
       byStage,
-      certRows,
+      programRows,
       counterRows,
       reachedAdmission: byStage.atAdmission + byStage.completed,
     };
-  }, [tickets]);
+  }, [tickets, programOptions]);
 
   // Drill-down: the actual ticket numbers behind whichever figure was
   // tapped. Recomputed from the live `tickets` on every refresh, so a
@@ -192,7 +227,7 @@ export default function ViewPage() {
               const stage = stageOf(t)!;
               return (
                 <div
-                  key={t.ticket_number}
+                  key={`${t.building}-${t.ticket_number}`}
                   className="bg-white border border-slate-200 rounded-2xl shadow-sm px-5 py-4 flex items-center gap-4"
                 >
                   <span className="text-3xl font-extrabold text-blue-900 min-w-[3rem] text-center">
@@ -200,7 +235,10 @@ export default function ViewPage() {
                   </span>
                   <div className="flex-1 text-end">
                     <div className="font-bold text-slate-800 text-sm leading-tight">
-                      {certificateLabel(t.certificate_type)}
+                      {programLabel(t.program)}
+                      {buildingFilter === ALL_BUILDINGS && t.building && (
+                        <span className="text-slate-400 font-normal"> · مبنى {t.building}</span>
+                      )}
                     </div>
                     <div className="text-xs text-slate-500 mt-0.5">
                       {STAGE_LABEL[stage]}
@@ -225,13 +263,45 @@ export default function ViewPage() {
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col items-center px-4 py-8 gap-5">
       <header className="text-center">
-        <h1 className="text-xl font-extrabold text-blue-900">إحصائية اليوم</h1>
+        <h1 className="text-xl font-extrabold text-blue-900">إحصائية اليوم — كل المباني</h1>
         <div className="text-xs text-slate-500 mt-1">{businessDate}</div>
         <div className="text-[11px] text-slate-400 mt-1">اضغط على أي رقم تشوف الأرقام اللي جواه</div>
       </header>
 
+      {/* Building filter — the one thing that makes this page different
+          from /, /call, /admission: it's never locked to a single
+          building, just optionally filtered to one. */}
+      <div className="w-full max-w-md flex flex-wrap justify-center gap-2">
+        <button
+          onClick={() => setBuildingFilter(ALL_BUILDINGS)}
+          className={`rounded-full px-4 py-2 text-sm font-bold border-2 transition-colors ${
+            buildingFilter === ALL_BUILDINGS
+              ? "bg-blue-600 border-blue-600 text-white"
+              : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
+          }`}
+        >
+          كل المباني
+        </button>
+        {BUILDINGS.map((b) => (
+          <button
+            key={b.value}
+            onClick={() => setBuildingFilter(b.value)}
+            className={`rounded-full px-4 py-2 text-sm font-bold border-2 transition-colors ${
+              buildingFilter === b.value
+                ? "bg-blue-600 border-blue-600 text-white"
+                : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
+            }`}
+          >
+            {b.value} — {b.label}
+          </button>
+        ))}
+      </div>
+
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm px-6 py-4 text-center w-full max-w-md">
-        <div className="text-xs text-slate-500">إجمالي الأرقام النهارده</div>
+        <div className="text-xs text-slate-500">
+          إجمالي الأرقام النهارده
+          {buildingFilter !== ALL_BUILDINGS && ` — مبنى ${buildingFilter}`}
+        </div>
         <button
           onClick={() => setDrill({ title: "كل أرقام النهارده", match: () => true })}
           className="text-4xl font-extrabold text-blue-900 mt-1 hover:text-blue-700"
@@ -280,24 +350,24 @@ export default function ViewPage() {
         ))}
       </section>
 
-      {/* Per certificate */}
+      {/* Per program (across the filtered building, or all four) */}
       <section className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 text-sm font-bold text-slate-600">
-          حسب الشهادة
+          حسب البرنامج
         </div>
-        {stats.certRows.length === 0 ? (
+        {stats.programRows.length === 0 ? (
           <div className="px-5 py-8 text-center text-slate-500 text-sm">لسه مفيش أرقام النهارده</div>
         ) : (
           <>
             <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-5 py-2 bg-slate-50/60 border-b border-slate-100 text-[11px] font-bold text-slate-500">
-              <span>الشهادة</span>
+              <span>البرنامج</span>
               <span className="w-12 text-center">الكل</span>
               <span className="w-12 text-center">منتظر</span>
               <span className="w-12 text-center">خلص</span>
             </div>
-            {stats.certRows.map((row) => {
-              const matchesCert = (t: Ticket) =>
-                row.value === "__none__" ? !t.certificate_type : t.certificate_type === row.value;
+            {stats.programRows.map((row) => {
+              const matchesProgram = (t: Ticket) =>
+                row.value === "__none__" ? !t.program : t.program === row.value;
               return (
                 <div
                   key={row.value}
@@ -305,7 +375,7 @@ export default function ViewPage() {
                 >
                   <span className="font-bold text-slate-800 text-sm leading-tight">{row.label}</span>
                   <button
-                    onClick={() => setDrill({ title: row.label, match: matchesCert })}
+                    onClick={() => setDrill({ title: row.label, match: matchesProgram })}
                     className="w-12 text-center text-lg font-extrabold text-slate-700 hover:text-blue-700"
                   >
                     {row.total}
@@ -314,7 +384,7 @@ export default function ViewPage() {
                     onClick={() =>
                       setDrill({
                         title: `${row.label} — منتظرين شؤون الطلاب`,
-                        match: (t) => matchesCert(t) && stageOf(t) === "waitingAdmission",
+                        match: (t) => matchesProgram(t) && stageOf(t) === "waitingAdmission",
                       })
                     }
                     className={`w-12 text-center text-lg font-extrabold ${
@@ -327,7 +397,7 @@ export default function ViewPage() {
                     onClick={() =>
                       setDrill({
                         title: `${row.label} — خلّصوا`,
-                        match: (t) => matchesCert(t) && stageOf(t) === "completed",
+                        match: (t) => matchesProgram(t) && stageOf(t) === "completed",
                       })
                     }
                     className={`w-12 text-center text-lg font-extrabold ${
@@ -346,7 +416,9 @@ export default function ViewPage() {
         </div>
       </section>
 
-      {/* Per counter — unchanged behaviour, just counted correctly now */}
+      {/* Per counter, per building — unchanged behaviour, just counted
+          correctly across buildings now (counter numbers repeat per
+          building, so building is part of the grouping key). */}
       <section className="w-full max-w-md flex flex-col gap-3">
         <div className="text-sm font-bold text-slate-600 px-1">حسب المكتب</div>
         {stats.counterRows.length === 0 ? (
@@ -355,17 +427,22 @@ export default function ViewPage() {
           </div>
         ) : (
           stats.counterRows.map((counter) => {
-            const isOpen = openCounter === counter.counterNumber;
+            const isOpen = openCounter === counter.key;
             return (
               <div
-                key={counter.counterNumber}
+                key={counter.key}
                 className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden"
               >
                 <button
-                  onClick={() => setOpenCounter(isOpen ? null : counter.counterNumber)}
+                  onClick={() => setOpenCounter(isOpen ? null : counter.key)}
                   className="w-full flex items-center justify-between px-5 py-4"
                 >
-                  <span className="font-bold text-blue-900">مكتب رقم {counter.counterNumber}</span>
+                  <span className="font-bold text-blue-900">
+                    مكتب رقم {counter.counterNumber}
+                    {buildingFilter === ALL_BUILDINGS && (
+                      <span className="text-slate-400 font-normal"> · مبنى {counter.building}</span>
+                    )}
+                  </span>
                   <span className="flex items-center gap-2">
                     <span className="text-2xl font-extrabold text-slate-800">{counter.numbers.length}</span>
                     <span className={`text-slate-400 transition-transform ${isOpen ? "rotate-180" : ""}`}>▾</span>

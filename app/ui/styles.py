@@ -44,6 +44,26 @@ QLabel#sectionLabel {
     font-weight: 600;
 }
 
+QLabel#buildingLabel {
+    font-size: 15px;
+    font-weight: 700;
+    color: white;
+    background-color: #1e3a8a;
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+
+QPushButton#changeBuildingButton {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1e3a8a;
+    background-color: white;
+    border: 1px solid #1e3a8a;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+QPushButton#changeBuildingButton:hover { background-color: #eff6ff; }
+
 QLabel#bigNumber {
     font-size: 72px;
     font-weight: 800;

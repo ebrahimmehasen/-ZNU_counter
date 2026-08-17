@@ -28,16 +28,29 @@ correct positional forms) and python-bidi's get_display (produces
 the correct visual left-to-right pixel order for the mixed-direction
 line) before handing it to PIL — drawing the raw string directly
 would render disconnected, wrong-shaped Arabic letters.
+
+Multi-building: every ticket now also carries a building + program
+(see PLAN_MULTI_BUILDING.md), and the printed ticket should show both
+so a student can tell at a glance which building/queue their number
+belongs to. BUILDING_PROGRAM_CENTER below is a PLACEHOLDER position —
+it has not been measured against the real template image the way
+NUMBER_BOX and DATETIME_CENTER were. Update it (and re-check
+BUILDING_PROGRAM_FONT_SIZE) once the real coordinates are provided;
+until then the line still renders, just not necessarily in the ideal
+spot.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import arabic_reshaper
 from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont
+
+from app.core.certificates import building_label, program_label
 
 # Box measured directly on templates/ticket_template_highres.png
 # (3778x4416, exported from Word at 1200 DPI). Update these four
@@ -57,12 +70,31 @@ FONT_CANDIDATES = (
 DATETIME_CENTER = (1889, 4158)  # x, y — horizontal center is the page's own center
 DATETIME_FONT_SIZE = 115
 
+# PLACEHOLDER — not yet measured against the real template image. Sits
+# just above the date/time line for now (same horizontal center) so it
+# renders somewhere reasonable rather than off-page; replace with the
+# real coordinates once the template is updated to reserve space for
+# this line and the position is measured the same way NUMBER_BOX and
+# DATETIME_CENTER were (see this module's docstring).
+BUILDING_PROGRAM_CENTER = (1889, 3990)  # x, y
+BUILDING_PROGRAM_FONT_SIZE = 100
+
 
 def _format_datetime_line(moment: datetime) -> str:
     period = "م" if moment.hour >= 12 else "ص"
     hour12 = moment.strftime("%I:%M")
     date_part = moment.strftime("%Y/%m/%d")
     return f"التاريخ و الوقت: {date_part} {hour12} {period}"
+
+
+def _format_building_program_line(building: Optional[str], program: Optional[str]) -> Optional[str]:
+    b_label = building_label(building) if building else None
+    p_label = program_label(program) if program else None
+    if not b_label and not p_label:
+        return None
+    if b_label and p_label:
+        return f"مبنى {building} — {b_label} / {p_label}"
+    return b_label or p_label
 
 
 class TicketImageError(Exception):
@@ -86,6 +118,10 @@ def render_ticket_image(
     right_gap: int = RIGHT_GAP,
     datetime_center: tuple[int, int] = DATETIME_CENTER,
     datetime_font_size: int = DATETIME_FONT_SIZE,
+    building: Optional[str] = None,
+    program: Optional[str] = None,
+    building_program_center: tuple[int, int] = BUILDING_PROGRAM_CENTER,
+    building_program_font_size: int = BUILDING_PROGRAM_FONT_SIZE,
 ) -> Path:
     template_image_path = Path(template_image_path)
     if not template_image_path.exists():
@@ -114,6 +150,14 @@ def render_ticket_image(
     datetime_display = get_display(arabic_reshaper.reshape(datetime_line))
     datetime_font = _load_font(datetime_font_size)
     draw.text(datetime_center, datetime_display, font=datetime_font, fill=(0, 0, 0), anchor="mm")
+
+    building_program_line = _format_building_program_line(building, program)
+    if building_program_line:
+        bp_display = get_display(arabic_reshaper.reshape(building_program_line))
+        bp_font = _load_font(building_program_font_size)
+        draw.text(
+            building_program_center, bp_display, font=bp_font, fill=(0, 0, 0), anchor="mm"
+        )
 
     out_path = output_dir / f"ticket_{text}_{uuid.uuid4().hex[:8]}.png"
     im.save(out_path)

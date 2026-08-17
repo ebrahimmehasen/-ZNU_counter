@@ -1,43 +1,26 @@
-// The certificate types a ticket can be issued for — the web app's copy
-// of the canonical list.
+// DEPRECATED — kept only because this session's tooling can't rename
+// or delete files on the target machine (see the equivalent note atop
+// app/core/certificates.py on the Python side). The certificate-type
+// concept this file used to hold was fully replaced by the
+// building/program model in ./buildings.ts as part of the
+// multi-building migration (see PLAN_MULTI_BUILDING.md). Every page in
+// this app now imports from "@/lib/buildings" instead.
 //
-// `value` is the stable internal identifier stored in
-// `tickets.certificate_type`; `label` is Arabic display text only.
-// Never key logic off the label — rewording it must not orphan tickets
-// already issued under it.
-//
-// MIRROR OF app/core/certificates.py (Python, desktop app). The two
-// MUST stay in sync: tests/test_certificates.py parses THIS file and
-// fails the suite if the values or labels drift apart, so edit both
-// together.
+// Safe follow-up for whoever next touches this repo directly: delete
+// this file once you've confirmed nothing still imports it (a repo
+// search for `from "@/lib/certificates"` should come back empty).
 
 export type CertificateType = {
   value: string;
   label: string;
 };
 
-export const CERTIFICATE_TYPES: CertificateType[] = [
-  { value: "ig", label: "شهادة الدبلومه البريطانية" },
-  { value: "saudi", label: "شهادة سعودية" },
-  { value: "qatari", label: "شهادة قطرية" },
-  { value: "bahraini", label: "شهادة بحرينية" },
-  { value: "kuwaiti", label: "شهادة كويتية" },
-  { value: "omani", label: "شهادة عمانية" },
-  { value: "yemeni", label: "شهادة يمنية" },
-  { value: "palestinian", label: "شهادة فلسطينية (توجيهي)" },
-  { value: "egyptian", label: "الثانوية العامة المصرية" },
-  { value: "azhar", label: "الثانوية الأزهرية" },
-  { value: "emirati", label: "الشهادة الإماراتية" },
-  { value: "americanDiploma", label: "الدبلومة الأمريكية" },
-  { value: "other", label: "أخرى" },
-];
+/** @deprecated Use BUILDINGS from "@/lib/buildings" instead — programs
+ * are now scoped per building, not a single flat list. */
+export const CERTIFICATE_TYPES: CertificateType[] = [];
 
-const LABELS = new Map(CERTIFICATE_TYPES.map((c) => [c.value, c.label]));
-
-/** Display text for a stored certificate value. Unknown/missing values
- * render as a dash rather than throwing — tickets printed before this
- * feature existed have a null certificate_type and must still show up. */
+/** @deprecated Use programLabel from "@/lib/buildings" instead. */
 export function certificateLabel(value: string | null | undefined): string {
   if (!value) return "—";
-  return LABELS.get(value) ?? value;
+  return value;
 }
