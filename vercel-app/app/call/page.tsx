@@ -11,7 +11,7 @@ const RECALL_LOCKED_MESSAGE = "اطلب الرقم اللي بعده شكله ر
 // "مفيش حد مستنّي" escalates the more times in a row "اطلب رقم جديد"
 // comes back empty — see emptyStreak below. Caps at the last message
 // rather than continuing to escalate forever.
-const EMPTY_QUEUE_MESSAGES = ["مفيش حد مستنّي دلوقتي.", "ريح صباعك.", "ما قلنا مفيش حد، متقرفناش."];
+const EMPTY_QUEUE_MESSAGES = ["مفيش حد مستنّي دلوقتي.", "ريح صباعك.", "ما قلنا مفيش حد متقرفناش 😒"];
 
 const STORAGE_KEY = "queue_counter_number";
 
