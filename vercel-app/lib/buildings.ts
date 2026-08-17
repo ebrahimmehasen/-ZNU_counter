@@ -69,12 +69,18 @@ export const BUILDINGS: Building[] = [
   },
 ];
 
-const BUILDINGS_BY_VALUE = new Map(BUILDINGS.map((b) => [b.value, b]));
-const BUILDING_LABELS = new Map(BUILDINGS.map((b) => [b.value, b.label] as const));
-const PROGRAM_LABELS = new Map(
+// Keyed by plain `string`, not the "B"|"C"|"E"|"F" literal union: every
+// caller here is looking up a value that came from storage/the network
+// (localStorage, a DB column, a URL) — genuinely just a string, not a
+// value TypeScript can statically know is one of the four buildings.
+// `Building.value` keeps the narrow literal type for authoring safety
+// (BUILDINGS above is written by hand), it's only widened at lookup time.
+const BUILDINGS_BY_VALUE = new Map<string, Building>(BUILDINGS.map((b) => [b.value, b]));
+const BUILDING_LABELS = new Map<string, string>(BUILDINGS.map((b) => [b.value, b.label]));
+const PROGRAM_LABELS = new Map<string, string>(
   BUILDINGS.flatMap((b) => b.programs.map((p) => [p.value, p.label] as const))
 );
-const PROGRAM_BUILDING = new Map(
+const PROGRAM_BUILDING = new Map<string, string>(
   BUILDINGS.flatMap((b) => b.programs.map((p) => [p.value, b.value] as const))
 );
 
