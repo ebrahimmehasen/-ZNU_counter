@@ -31,10 +31,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
 import { buildingLabel, clearSelectedBuilding, getBuilding, getSelectedBuilding, programLabel, setSelectedBuilding } from "@/lib/buildings";
 import BuildingPicker from "@/components/BuildingPicker";
+import RecallButton from "@/components/RecallButton";
 import { announceAdmissionTicket, speechAvailable, unlockSpeech } from "@/lib/speech";
 
 const SELECTION_STORAGE_KEY = "admission_programs";
 const DESK_STORAGE_KEY = "admission_desk_id";
+const RECALL_LOCKED_MESSAGE = "اطلب الرقم اللي بعده يا دكتور";
 
 type NowServing = {
   ticketNumber: number;
@@ -83,6 +85,15 @@ export default function AdmissionPage() {
   // Announcements are keyed off what THIS page called, so a refresh
   // never replays an old call as if it were new.
   const announcedRef = useRef<string | null>(null);
+
+  // "المناداة مرة أخرى" state — see components/RecallButton.tsx. Kept
+  // in sync with nowServing via prevCalledAtRef (below) rather than
+  // just resetting on every refresh(), since refresh() polls every 5s
+  // and on every realtime event — resetting unconditionally there would
+  // wipe out an in-progress cooldown/recall count on every tick.
+  const [lastCallAt, setLastCallAt] = useState<number | null>(null);
+  const [recallCount, setRecallCount] = useState(0);
+  const prevCalledAtRef = useRef<string | null>(null);
 
   // Deferred to an effect: localStorage/crypto/window don't exist during
   // the server-rendered shell, and todayBusinessDate() reads the local
@@ -175,15 +186,23 @@ export default function AdmissionPage() {
       // state, so refreshing the page mid-review still shows the
       // student this desk is actually holding.
       const serving = servingRows?.[0];
-      setNowServing(
-        serving
-          ? {
-              ticketNumber: serving.ticket_number,
-              program: serving.program,
-              calledAt: serving.admission_called_at,
-            }
-          : null
-      );
+      const nextServing: NowServing | null = serving
+        ? {
+            ticketNumber: serving.ticket_number,
+            program: serving.program,
+            calledAt: serving.admission_called_at,
+          }
+        : null;
+      // Only reset the recall cooldown/count when the served ticket's
+      // calledAt actually changed (a genuinely new call/recall) — this
+      // runs on every poll, so comparing against the ref (not state)
+      // keeps an in-progress countdown from being wiped every 5s.
+      if (nextServing?.calledAt !== prevCalledAtRef.current) {
+        prevCalledAtRef.current = nextServing?.calledAt ?? null;
+        setLastCallAt(nextServing ? new Date(nextServing.calledAt).getTime() : null);
+        setRecallCount(0);
+      }
+      setNowServing(nextServing);
       setOffline(false);
     } catch {
       setOffline(true);
@@ -262,12 +281,44 @@ export default function AdmissionPage() {
           calledAt: row.out_called_at,
         };
         setNowServing(called);
+        prevCalledAtRef.current = called.calledAt;
+        setLastCallAt(new Date(called.calledAt).getTime());
+        setRecallCount(0);
         if (announcedRef.current !== called.calledAt) {
           announcedRef.current = called.calledAt;
           announceAdmissionTicket(called.ticketNumber, programLabel(called.program));
         }
       }
       refresh();
+    } catch (e) {
+      setOutcome({
+        kind: "error",
+        message: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recallCurrent() {
+    if (!building || !nowServing) return;
+    setBusy(true);
+    setOutcome(null);
+    try {
+      const { data, error } = await supabase.rpc("admission_recall_ticket", {
+        p_building: building,
+        p_business_date: businessDate,
+        p_desk: deskId,
+      });
+      if (error) throw error;
+      const row = data?.[0];
+      if (row?.out_called_at) {
+        prevCalledAtRef.current = row.out_called_at;
+        setLastCallAt(new Date(row.out_called_at).getTime());
+        setRecallCount((c) => c + 1);
+        setNowServing((prev) => (prev ? { ...prev, calledAt: row.out_called_at } : prev));
+        announceAdmissionTicket(nowServing.ticketNumber, programLabel(nowServing.program));
+      }
     } catch (e) {
       setOutcome({
         kind: "error",
@@ -293,6 +344,9 @@ export default function AdmissionPage() {
       const finishedNumber = data?.[0]?.out_finished_ticket_number ?? nowServing.ticketNumber;
       setOutcome({ kind: "finished", ticketNumber: finishedNumber });
       setNowServing(null);
+      prevCalledAtRef.current = null;
+      setLastCallAt(null);
+      setRecallCount(0);
       refresh();
     } catch (e) {
       setOutcome({
@@ -399,13 +453,22 @@ export default function AdmissionPage() {
       </section>
 
       {nowServing ? (
-        <button
-          onClick={finishReview}
-          disabled={busy}
-          className="w-full max-w-md bg-amber-600 hover:bg-amber-700 disabled:bg-slate-400 text-white font-extrabold text-2xl rounded-2xl py-7"
-        >
-          {busy ? "جاري الحفظ…" : "تمت المراجعة"}
-        </button>
+        <div className="w-full max-w-md flex flex-col gap-2">
+          <button
+            onClick={finishReview}
+            disabled={busy}
+            className="w-full bg-amber-600 hover:bg-amber-700 disabled:bg-slate-400 text-white font-extrabold text-2xl rounded-2xl py-7"
+          >
+            {busy ? "جاري الحفظ…" : "تمت المراجعة"}
+          </button>
+          <RecallButton
+            lastCallAt={lastCallAt}
+            recallCount={recallCount}
+            onRecall={recallCurrent}
+            busy={busy}
+            lockedMessage={RECALL_LOCKED_MESSAGE}
+          />
+        </div>
       ) : (
         <button
           onClick={claimNext}

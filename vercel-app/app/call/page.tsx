@@ -4,6 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
 import { buildingLabel, clearSelectedBuilding, getSelectedBuilding, programLabel, setSelectedBuilding } from "@/lib/buildings";
 import BuildingPicker from "@/components/BuildingPicker";
+import RecallButton from "@/components/RecallButton";
+
+const RECALL_LOCKED_MESSAGE = "اطلب الرقم اللي بعده شكله روح متتعبناش";
 
 const STORAGE_KEY = "queue_counter_number";
 
@@ -45,6 +48,13 @@ export default function CallPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message>(null);
 
+  // "المناداة مرة أخرى" state — see components/RecallButton.tsx.
+  // lastCallAt is the epoch ms of the initial call OR the most recent
+  // recall (whichever is later); recallCount resets to 0 every time a
+  // genuinely new ticket is called (never on a recall of the same one).
+  const [lastCallAt, setLastCallAt] = useState<number | null>(null);
+  const [recallCount, setRecallCount] = useState(0);
+
   // Remembered per-device, so the employee at this counter only sets
   // it up once — reopening the page later goes straight to the call
   // screen, not back through setup.
@@ -72,7 +82,7 @@ export default function CallPage() {
   const refreshCurrent = useCallback(async (b: string, counter: number) => {
     const { data } = await supabase
       .from("tickets")
-      .select("ticket_number, program")
+      .select("ticket_number, program, called_at")
       .eq("building", b)
       .eq("business_date", todayBusinessDate())
       .eq("status", "CALLED")
@@ -81,6 +91,12 @@ export default function CallPage() {
       .limit(1);
     const row = data?.[0];
     setCurrent(row ? { ticketNumber: row.ticket_number, program: row.program } : null);
+    // This only ever runs once, on page load (see the effect below) —
+    // not on a poll — so it's safe to unconditionally (re)start the
+    // recall cooldown from the ticket's real called_at rather than
+    // needing to guard against clobbering an in-progress countdown.
+    setLastCallAt(row ? new Date(row.called_at).getTime() : null);
+    setRecallCount(0);
   }, []);
 
   // Counted by counter_number, not by status='CALLED': a finished
@@ -150,7 +166,32 @@ export default function CallPage() {
           ticketNumber: row.out_ticket_number,
           program: ticketRow?.program ?? null,
         });
+        setLastCallAt(row.out_called_at ? new Date(row.out_called_at).getTime() : Date.now());
+        setRecallCount(0);
         refreshServedCount(building, counterNumber);
+      }
+    } catch (e) {
+      setMessage({ kind: "error", text: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recallCurrent() {
+    if (!building || counterNumber === null || !current) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const { data, error } = await supabase.rpc("recall_ticket", {
+        p_building: building,
+        p_business_date: todayBusinessDate(),
+        p_counter_number: counterNumber,
+      });
+      if (error) throw error;
+      const row = data?.[0];
+      if (row?.out_called_at) {
+        setLastCallAt(new Date(row.out_called_at).getTime());
+        setRecallCount((c) => c + 1);
       }
     } catch (e) {
       setMessage({ kind: "error", text: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
@@ -174,6 +215,8 @@ export default function CallPage() {
       const finishedNumber = data?.[0]?.out_finished_ticket_number ?? current.ticketNumber;
       setMessage({ kind: "finished", ticketNumber: finishedNumber });
       setCurrent(null);
+      setLastCallAt(null);
+      setRecallCount(0);
     } catch (e) {
       setMessage({ kind: "error", text: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
     } finally {
@@ -255,13 +298,22 @@ export default function CallPage() {
         )}
 
         {current ? (
-          <button
-            onClick={finishReview}
-            disabled={busy}
-            className="w-full bg-amber-600 hover:bg-amber-700 disabled:bg-slate-400 text-white font-extrabold text-lg rounded-lg py-5"
-          >
-            {busy ? "جاري الحفظ…" : "تمت المراجعة"}
-          </button>
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={finishReview}
+              disabled={busy}
+              className="w-full bg-amber-600 hover:bg-amber-700 disabled:bg-slate-400 text-white font-extrabold text-lg rounded-lg py-5"
+            >
+              {busy ? "جاري الحفظ…" : "تمت المراجعة"}
+            </button>
+            <RecallButton
+              lastCallAt={lastCallAt}
+              recallCount={recallCount}
+              onRecall={recallCurrent}
+              busy={busy}
+              lockedMessage={RECALL_LOCKED_MESSAGE}
+            />
+          </div>
         ) : (
           <button
             onClick={requestNext}
