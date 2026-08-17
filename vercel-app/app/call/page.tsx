@@ -8,6 +8,11 @@ import RecallButton from "@/components/RecallButton";
 
 const RECALL_LOCKED_MESSAGE = "اطلب الرقم اللي بعده شكله روح متتعبناش";
 
+// "مفيش حد مستنّي" escalates the more times in a row "اطلب رقم جديد"
+// comes back empty — see emptyStreak below. Caps at the last message
+// rather than continuing to escalate forever.
+const EMPTY_QUEUE_MESSAGES = ["مفيش حد مستنّي دلوقتي.", "ريح صباعك.", "ما قلنا مفيش حد، متقرفناش."];
+
 const STORAGE_KEY = "queue_counter_number";
 
 type CurrentTicket = { ticketNumber: number; program: string | null } | null;
@@ -54,6 +59,11 @@ export default function CallPage() {
   // genuinely new ticket is called (never on a recall of the same one).
   const [lastCallAt, setLastCallAt] = useState<number | null>(null);
   const [recallCount, setRecallCount] = useState(0);
+
+  // Consecutive "اطلب رقم جديد" presses that came back empty — resets
+  // to 0 the moment a real ticket is claimed. Drives which message in
+  // EMPTY_QUEUE_MESSAGES is shown (see requestNext / the render below).
+  const [emptyStreak, setEmptyStreak] = useState(0);
 
   // Remembered per-device, so the employee at this counter only sets
   // it up once — reopening the page later goes straight to the call
@@ -149,7 +159,9 @@ export default function CallPage() {
       if (!row || row.out_ticket_number === null) {
         setMessage({ kind: "empty" });
         setCurrent(null);
+        setEmptyStreak((s) => s + 1);
       } else {
+        setEmptyStreak(0);
         // call_next_ticket() (unlike finish_first_review_and_call_next)
         // doesn't return the program in its result columns — it's the
         // older, untouched function other callers still rely on, so
@@ -330,7 +342,11 @@ export default function CallPage() {
               الرقم #{message.ticketNumber} اتحوّل لشؤون الطلاب. اضغط &quot;اطلب رقم جديد&quot; لما تكون جاهز.
             </span>
           )}
-          {message?.kind === "empty" && <span className="text-amber-700 font-bold">مفيش حد مستنّي دلوقتي.</span>}
+          {message?.kind === "empty" && (
+            <span className="text-amber-700 font-bold">
+              {EMPTY_QUEUE_MESSAGES[Math.min(emptyStreak, EMPTY_QUEUE_MESSAGES.length) - 1]}
+            </span>
+          )}
           {message?.kind === "error" && <span className="text-red-700 font-bold">{message.text}</span>}
         </div>
       </div>
