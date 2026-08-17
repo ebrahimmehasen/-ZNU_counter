@@ -755,6 +755,33 @@ $$;
 
 grant execute on function admin_reset_business_date(text, date, text) to anon;
 
+-- Free-tier usage check for /view's "استهلاك السيرفر" panel — lets
+-- whoever manages the display screens see, without touching the
+-- Supabase dashboard, whether this project is getting close to the
+-- Free plan's limits (500MB database, ~200 concurrent Realtime
+-- connections as of writing — see PLAN_MULTI_BUILDING.md/README for
+-- where that's discussed). out_active_connections is EVERY connection
+-- to this Postgres instance (PostgREST's pool, Realtime, etc. included,
+-- not just "N employees online") — a rough load signal, not a precise
+-- count of app users. SECURITY DEFINER is what makes pg_database_size
+-- and pg_stat_activity readable through the anon key at all; neither
+-- exposes ticket data, so this is safe to grant broadly like the rest
+-- of this file's RPCs.
+create or replace function get_db_usage_stats()
+returns table(out_database_size_bytes bigint, out_active_connections integer)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    out_database_size_bytes := pg_database_size(current_database());
+    select count(*) into out_active_connections from pg_stat_activity;
+    return next;
+end;
+$$;
+
+grant execute on function get_db_usage_stats() to anon;
+
 -- Enable Realtime for the public display page's live subscription
 -- (Database > Replication > supabase_realtime in the dashboard also
 -- works instead of this statement). Guarded because, unlike the rest

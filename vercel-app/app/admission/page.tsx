@@ -28,7 +28,7 @@
 // page only renders what the RPCs return.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { rpcWithRetry, supabase, todayBusinessDate } from "@/lib/supabaseClient";
 import { buildingLabel, clearSelectedBuilding, getBuilding, getSelectedBuilding, programLabel, setSelectedBuilding } from "@/lib/buildings";
 import BuildingPicker from "@/components/BuildingPicker";
 import RecallButton from "@/components/RecallButton";
@@ -262,12 +262,14 @@ export default function AdmissionPage() {
     setOutcome(null);
     unlockSpeech();
     try {
-      const { data, error } = await supabase.rpc("admission_claim_next", {
-        p_building: building,
-        p_business_date: businessDate,
-        p_programs: selected,
-        p_desk: deskId,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("admission_claim_next", {
+          p_building: building,
+          p_business_date: businessDate,
+          p_programs: selected,
+          p_desk: deskId,
+        })
+      );
       if (error) throw error;
 
       const row = data?.[0];
@@ -305,11 +307,13 @@ export default function AdmissionPage() {
     setBusy(true);
     setOutcome(null);
     try {
-      const { data, error } = await supabase.rpc("admission_recall_ticket", {
-        p_building: building,
-        p_business_date: businessDate,
-        p_desk: deskId,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("admission_recall_ticket", {
+          p_building: building,
+          p_business_date: businessDate,
+          p_desk: deskId,
+        })
+      );
       if (error) throw error;
       const row = data?.[0];
       if (row?.out_called_at) {
@@ -334,11 +338,13 @@ export default function AdmissionPage() {
     setBusy(true);
     setOutcome(null);
     try {
-      const { data, error } = await supabase.rpc("admission_finish_review", {
-        p_building: building,
-        p_business_date: businessDate,
-        p_desk: deskId,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("admission_finish_review", {
+          p_building: building,
+          p_business_date: businessDate,
+          p_desk: deskId,
+        })
+      );
       if (error) throw error;
 
       const finishedNumber = data?.[0]?.out_finished_ticket_number ?? nowServing.ticketNumber;

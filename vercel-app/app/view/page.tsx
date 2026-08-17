@@ -16,8 +16,18 @@
 // mid-refresh.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { rpcWithRetry, supabase, todayBusinessDate } from "@/lib/supabaseClient";
 import { BUILDINGS, buildingLabel, getBuilding, programLabel } from "@/lib/buildings";
+
+// Supabase's published Free-plan limits as of writing (see Supabase's
+// pricing page) — hardcoded because they're plan constants, not
+// anything queryable from Postgres itself. Only used for the "how
+// close are we" comparison in the usage panel below; if the project is
+// ever upgraded off Free, these numbers just stop being the relevant
+// ceiling — nothing breaks.
+const FREE_TIER_DB_LIMIT_MB = 500;
+
+type UsageStats = { databaseSizeMb: number; activeConnections: number } | null;
 
 type Ticket = {
   ticket_number: number;
@@ -74,6 +84,31 @@ export default function ViewPage() {
   const [openCounter, setOpenCounter] = useState<string | null>(null); // `${building}-${counterNumber}`
   const [offline, setOffline] = useState(false);
   const [drill, setDrill] = useState<Drill>(null);
+
+  // Free-tier usage panel — fetched on demand (button click), not on a
+  // timer: this is a manual "should we upgrade yet" check for whoever
+  // supervises the system, not something that needs to stay live like
+  // the ticket stats above.
+  const [usage, setUsage] = useState<UsageStats>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState(false);
+  const [showUsage, setShowUsage] = useState(false);
+
+  async function loadUsage() {
+    setShowUsage(true);
+    setUsageLoading(true);
+    setUsageError(false);
+    const { data: row, error } = await rpcWithRetry(() => supabase.rpc("get_db_usage_stats"));
+    if (error || !row?.[0]) {
+      setUsageError(true);
+    } else {
+      setUsage({
+        databaseSizeMb: row[0].out_database_size_bytes / (1024 * 1024),
+        activeConnections: row[0].out_active_connections,
+      });
+    }
+    setUsageLoading(false);
+  }
 
   useEffect(() => {
     setBusinessDate(todayBusinessDate());
@@ -465,6 +500,54 @@ export default function ViewPage() {
           })
         )}
       </section>
+
+      {/* Manual, on-demand check of the Free-tier Supabase project's
+          current usage — for the supervisor using this page to decide
+          when it's time to upgrade off Free, not shown to students. */}
+      <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-sm p-4">
+        {!showUsage ? (
+          <button
+            onClick={loadUsage}
+            className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 text-sm font-bold rounded-xl px-4 py-3"
+          >
+            📊 استهلاك السيرفر (Free tier)
+          </button>
+        ) : usageLoading ? (
+          <span className="text-sm text-slate-400">بيحمّل…</span>
+        ) : usageError ? (
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-red-600 font-bold">تعذّر تحميل الاستهلاك.</span>
+            <button onClick={loadUsage} className="text-sm text-blue-700 underline">
+              حاول تاني
+            </button>
+          </div>
+        ) : usage ? (
+          <>
+            <div className="text-sm">
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-500">حجم القاعدة</span>
+                <span
+                  className={`font-bold ${
+                    usage.databaseSizeMb / FREE_TIER_DB_LIMIT_MB > 0.8 ? "text-red-600" : "text-slate-800"
+                  }`}
+                >
+                  {usage.databaseSizeMb.toFixed(1)} / {FREE_TIER_DB_LIMIT_MB} MB
+                </span>
+              </div>
+              <div className="flex justify-between gap-3 mt-1">
+                <span className="text-slate-500">الاتصالات الحالية</span>
+                <span className="font-bold text-slate-800">{usage.activeConnections}</span>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-2">
+              الاتصالات دي إجمالي كل حاجة متصلة بالقاعدة (مش بس عدد الموظفين) — مؤشر تقريبي على الحمل مش رقم دقيق.
+            </p>
+            <button onClick={loadUsage} className="text-sm text-blue-700 underline mt-2">
+              تحديث
+            </button>
+          </>
+        ) : null}
+      </div>
 
       {offline && (
         <div className="fixed bottom-0 left-0 right-0 bg-orange-100 text-orange-800 text-center py-2 text-sm">

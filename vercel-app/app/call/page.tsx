@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { rpcWithRetry, supabase, todayBusinessDate } from "@/lib/supabaseClient";
 import { buildingLabel, clearSelectedBuilding, getSelectedBuilding, programLabel, setSelectedBuilding } from "@/lib/buildings";
 import BuildingPicker from "@/components/BuildingPicker";
 import RecallButton from "@/components/RecallButton";
@@ -148,11 +148,13 @@ export default function CallPage() {
     setBusy(true);
     setMessage(null);
     try {
-      const { data, error } = await supabase.rpc("call_next_ticket", {
-        p_building: building,
-        p_business_date: todayBusinessDate(),
-        p_counter_number: counterNumber,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("call_next_ticket", {
+          p_building: building,
+          p_business_date: todayBusinessDate(),
+          p_counter_number: counterNumber,
+        })
+      );
       if (error) throw error;
 
       const row = data?.[0];
@@ -194,11 +196,13 @@ export default function CallPage() {
     setBusy(true);
     setMessage(null);
     try {
-      const { data, error } = await supabase.rpc("recall_ticket", {
-        p_building: building,
-        p_business_date: todayBusinessDate(),
-        p_counter_number: counterNumber,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("recall_ticket", {
+          p_building: building,
+          p_business_date: todayBusinessDate(),
+          p_counter_number: counterNumber,
+        })
+      );
       if (error) throw error;
       const row = data?.[0];
       if (row?.out_called_at) {
@@ -217,11 +221,13 @@ export default function CallPage() {
     setBusy(true);
     setMessage(null);
     try {
-      const { data, error } = await supabase.rpc("finish_first_review", {
-        p_building: building,
-        p_business_date: todayBusinessDate(),
-        p_counter_number: counterNumber,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("finish_first_review", {
+          p_building: building,
+          p_business_date: todayBusinessDate(),
+          p_counter_number: counterNumber,
+        })
+      );
       if (error) throw error;
 
       const finishedNumber = data?.[0]?.out_finished_ticket_number ?? current.ticketNumber;
