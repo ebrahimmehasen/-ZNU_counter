@@ -104,7 +104,14 @@ export default function AdmissionPage() {
     setBusinessDate(todayBusinessDate());
     setDeskId(loadOrCreateDeskId());
     setSoundAvailable(speechAvailable());
-    if (!b) return; // nothing to load yet — BuildingPicker comes first
+    if (!b) {
+      // No building saved yet (a fresh device) — nothing to load, but
+      // `selected` must still leave `null` here or the loading guard
+      // below (`building === null || selected === null`) blocks
+      // forever and BuildingPicker never gets a chance to render.
+      setSelected([]);
+      return;
+    }
 
     loadSelectionForBuilding(b);
   }, []);
