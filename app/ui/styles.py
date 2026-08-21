@@ -44,6 +44,26 @@ QLabel#sectionLabel {
     font-weight: 600;
 }
 
+QLabel#buildingLabel {
+    font-size: 15px;
+    font-weight: 700;
+    color: white;
+    background-color: #1e3a8a;
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+
+QPushButton#changeBuildingButton {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1e3a8a;
+    background-color: white;
+    border: 1px solid #1e3a8a;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+QPushButton#changeBuildingButton:hover { background-color: #eff6ff; }
+
 QLabel#bigNumber {
     font-size: 72px;
     font-weight: 800;
@@ -121,6 +141,51 @@ QFrame#warningBanner {
     background-color: #fef3c7;
     border: 1px solid #f59e0b;
     border-radius: 8px;
+}
+
+QLabel#certDialogTitle {
+    font-size: 22px;
+    font-weight: 800;
+    color: #1e3a8a;
+}
+
+QLabel#certDialogHint {
+    font-size: 13px;
+    color: #6b7280;
+}
+
+QPushButton#certButton {
+    font-size: 15px;
+    font-weight: 700;
+    color: #1f2937;
+    background-color: white;
+    border: 2px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 12px 10px;
+    text-align: center;
+}
+QPushButton#certButton:hover {
+    background-color: #eff6ff;
+    border-color: #2563eb;
+    color: #1d4ed8;
+}
+QPushButton#certButton:pressed { background-color: #dbeafe; }
+
+QPushButton#certCancelButton {
+    font-size: 14px;
+    font-weight: 700;
+    color: #b91c1c;
+    background-color: transparent;
+    border: 1px solid #fca5a5;
+    border-radius: 8px;
+    padding: 10px;
+}
+QPushButton#certCancelButton:hover { background-color: #fee2e2; }
+
+QLabel#certificateLabel {
+    font-size: 15px;
+    font-weight: 700;
+    color: #1d4ed8;
 }
 
 QTextEdit#logPanel {

@@ -148,8 +148,56 @@ async function drainQueue() {
   draining = false;
 }
 
+const ARABIC_ONES = ["صفر", "واحد", "اثنان", "ثلاثة", "أربعة", "خمسة", "ستة", "سبعة", "ثمانية", "تسعة"];
+const ARABIC_TEENS = [
+  "عشرة", "أحد عشر", "اثنا عشر", "ثلاثة عشر", "أربعة عشر",
+  "خمسة عشر", "ستة عشر", "سبعة عشر", "ثمانية عشر", "تسعة عشر",
+];
+const ARABIC_TENS = ["", "", "عشرون", "ثلاثون", "أربعون", "خمسون", "ستون", "سبعون", "ثمانون", "تسعون"];
+const ARABIC_HUNDREDS = [
+  "", "مئة", "مئتان", "ثلاثمئة", "أربعمئة", "خمسمئة", "ستمئة", "سبعمئة", "ثمانمئة", "تسعمئة",
+];
+
+/** Spells a number out as Arabic words (e.g. 12 -> "اثنا عشر") instead of
+ * handing the TTS engine bare digits — several installed Arabic voices read
+ * a multi-digit number digit-by-digit ("واحد اثنان" for 12) rather than as
+ * the whole number, which sounds wrong for a ticket/counter announcement. */
+function arabicNumberWords(num: number): string {
+  if (num < 0 || !Number.isFinite(num)) return String(num);
+  if (num === 0) return ARABIC_ONES[0];
+  if (num < 10) return ARABIC_ONES[num];
+  if (num < 20) return ARABIC_TEENS[num - 10];
+  if (num < 100) {
+    const tens = Math.floor(num / 10);
+    const ones = num % 10;
+    return ones === 0 ? ARABIC_TENS[tens] : `${ARABIC_ONES[ones]} و${ARABIC_TENS[tens]}`;
+  }
+  if (num < 1000) {
+    const hundreds = Math.floor(num / 100);
+    const rest = num % 100;
+    const hundredsWord = ARABIC_HUNDREDS[hundreds];
+    return rest === 0 ? hundredsWord : `${hundredsWord} و${arabicNumberWords(rest)}`;
+  }
+  return String(num); // beyond expected ticket range — fall back to digits
+}
+
 export function announceTicket(ticketNumber: number, counterNumber: number) {
-  announceQueue.push(`الرقم ${ticketNumber}، يرجى التوجه إلى مكتب رقم ${counterNumber} في قاعة المراجعة`);
+  announceQueue.push(
+    `الرقم ${arabicNumberWords(ticketNumber)}، يرجى التوجه إلى مكتب رقم ${arabicNumberWords(counterNumber)} في قاعة المراجعة`
+  );
+  void drainQueue();
+}
+
+/** Second-stage call: the student already passed the first reviewer and
+ * is now wanted at student affairs for their specific certificate. The
+ * certificate is spoken because several are queued in parallel — the
+ * number alone doesn't tell the student which desk is calling them.
+ * Goes through the same FIFO queue as the first-stage announcements so
+ * the two stages can never talk over each other. */
+export function announceAdmissionTicket(ticketNumber: number, certificateLabel: string) {
+  announceQueue.push(
+    `الرقم ${arabicNumberWords(ticketNumber)} توجه لمكتب شؤون الطلاب ${certificateLabel}`
+  );
   void drainQueue();
 }
 

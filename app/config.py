@@ -7,6 +7,7 @@ Non-secret, machine-specific settings live in config/config.yaml
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,23 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    # Which of the four buildings (B/C/E/F — see core/certificates.py's
+    # BUILDINGS list) this specific desktop install serves. Empty until
+    # the employee picks one on first run (see ui/building_dialog.py);
+    # persisted here (not .env) because it's a per-machine identity
+    # setting, not a secret, same category as the printer name below.
+    # One install == one building, by design (see PLAN_MULTI_BUILDING.md)
+    # — this is a single value, not a list.
+    building: str = ""
+    # "printer" (render + send to a real printer) or "preprinted" (the
+    # employee already has numbered tickets on paper; the app just
+    # tracks which number is next). Empty until chosen on first run —
+    # see ui/print_mode_dialog.py. Same per-machine-identity category
+    # as `building` above, not a secret.
+    print_mode: str = ""
+    # Where this config was loaded from — save_config() writes back here.
+    # Not read from the YAML file itself.
+    config_path: Path = field(default=None)
 
     def resolve_path(self, relative: str) -> Path:
         p = Path(relative)
@@ -94,11 +112,20 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
 
     config_path = Path(config_path) if config_path else PROJECT_ROOT / "config" / "config.yaml"
     if not config_path.exists():
+        # Every value in config.example.yaml is already a safe default
+        # (printer name "" just means "no override yet" — the UI's
+        # printer picker fills that in and persists it via
+        # save_config()) so a first run on a new machine should just
+        # work, not force a manual copy/edit step before the app will
+        # even open.
         example = PROJECT_ROOT / "config" / "config.example.yaml"
-        raise FileNotFoundError(
-            f"Config file not found: {config_path}\n"
-            f"Copy {example} to {config_path} and edit it first."
-        )
+        if not example.exists():
+            raise FileNotFoundError(
+                f"Config file not found: {config_path}\n"
+                f"config.example.yaml is also missing from {example.parent} — reinstall the app."
+            )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(example, config_path)
 
     with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
@@ -110,9 +137,42 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         sync=SyncConfig(**raw.get("sync", {})),
         logging=LoggingConfig(**raw.get("logging", {})),
         web=WebConfig(**raw.get("web", {})),
+        building=raw.get("building", "") or "",
+        print_mode=raw.get("print_mode", "") or "",
     )
     cfg.supabase = SupabaseConfig(
         url=os.environ.get("SUPABASE_URL", ""),
         key=os.environ.get("SUPABASE_KEY", ""),
     )
+    cfg.config_path = config_path
     return cfg
+
+
+def save_config(cfg: AppConfig) -> None:
+    """Persists the (non-secret) settings back to config.yaml — used by
+    the printer picker in the UI so a chosen printer survives restarts
+    instead of reverting to whatever Windows currently calls the
+    default printer, and by the building picker (ui/building_dialog.py)
+    so this device's building selection survives restarts too. Secrets
+    (Supabase URL/key) are never written here; they stay in .env."""
+    path = cfg.config_path or (PROJECT_ROOT / "config" / "config.yaml")
+    data = {
+        "printer": {"name": cfg.printer.name, "copies": cfg.printer.copies},
+        "template": {"path": cfg.template.path, "number_padding": cfg.template.number_padding},
+        "database": {"path": cfg.database.path},
+        "sync": {
+            "enabled": cfg.sync.enabled,
+            "interval_seconds": cfg.sync.interval_seconds,
+            "batch_size": cfg.sync.batch_size,
+        },
+        "logging": {"dir": cfg.logging.dir, "level": cfg.logging.level},
+        "web": {
+            "host": cfg.web.host,
+            "port": cfg.web.port,
+            "next_numbers_count": cfg.web.next_numbers_count,
+        },
+        "building": cfg.building,
+        "print_mode": cfg.print_mode,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)

@@ -3,6 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
 import {
+  buildingLabel,
+  clearSelectedBuilding,
+  getSelectedBuilding,
+  programLabel,
+  setSelectedBuilding,
+} from "@/lib/buildings";
+import BuildingPicker from "@/components/BuildingPicker";
+import {
+  announceAdmissionTicket,
   announceTest,
   announceTicket,
   getArabicVoices,
@@ -13,14 +22,35 @@ import {
   unlockSpeech,
 } from "@/lib/speech";
 
-type CalledTicket = { ticket_number: number; counter_number: number; called_at: string };
+// A student is called twice over their visit — once to a first-review
+// counter, and again to student affairs for their program. Both are
+// announcements the waiting hall needs to hear, so the display treats
+// them as one time-ordered stream rather than two lists, and each
+// entry carries where the student should actually go.
+type CalledEntry =
+  | { kind: "counter"; ticketNumber: number; at: string; counterNumber: number }
+  | { kind: "admission"; ticketNumber: number; at: string; program: string | null };
+
+// Every status meaning "this number was really issued today". A ticket
+// must not drop out of the day's total just because it moved further
+// down the workflow.
+const ISSUED_STATUSES = [
+  "PRINTED",
+  "CALLED",
+  "WAITING_FOR_ADMISSION",
+  "CALLED_BY_ADMISSION",
+  "COMPLETED",
+];
+// Everything past the general waiting hall — i.e. already called at
+// least once.
+const CALLED_STATUSES = ["CALLED", "WAITING_FOR_ADMISSION", "CALLED_BY_ADMISSION", "COMPLETED"];
 
 type DisplayData = {
-  // Last 5 called tickets, most recent first — not just the single
-  // latest one. If counter 3 calls #45 and counter 5 calls #46 a
-  // moment later, #45's "go to counter 3" must stay on screen, not
-  // vanish the instant a different counter calls someone else.
-  recentlyCalled: CalledTicket[];
+  // Last 5 calls, most recent first — not just the single latest one.
+  // If counter 3 calls #45 and counter 5 calls #46 a moment later,
+  // #45's "go to counter 3" must stay on screen, not vanish the
+  // instant a different counter calls someone else.
+  recentlyCalled: CalledEntry[];
   nextNumbers: number[];
   stats: { totalToday: number; waiting: number; called: number };
 };
@@ -31,44 +61,84 @@ const EMPTY: DisplayData = {
   stats: { totalToday: 0, waiting: 0, called: 0 },
 };
 
-async function fetchDisplayData(businessDate: string): Promise<DisplayData> {
-  const [{ data: calledRows }, { data: waitingRows }, { count: totalToday }, { count: waiting }, { count: called }] =
-    await Promise.all([
-      supabase
-        .from("tickets")
-        .select("ticket_number, counter_number, called_at")
-        .eq("business_date", businessDate)
-        .eq("status", "CALLED")
-        .order("called_at", { ascending: false })
-        .limit(5),
-      supabase
-        .from("tickets")
-        .select("ticket_number")
-        .eq("business_date", businessDate)
-        .eq("status", "PRINTED")
-        .is("called_at", null)
-        .order("ticket_number", { ascending: true })
-        .limit(5),
-      supabase
-        .from("tickets")
-        .select("uuid", { count: "exact", head: true })
-        .eq("business_date", businessDate)
-        .in("status", ["PRINTED", "CALLED"]),
-      supabase
-        .from("tickets")
-        .select("uuid", { count: "exact", head: true })
-        .eq("business_date", businessDate)
-        .eq("status", "PRINTED")
-        .is("called_at", null),
-      supabase
-        .from("tickets")
-        .select("uuid", { count: "exact", head: true })
-        .eq("business_date", businessDate)
-        .eq("status", "CALLED"),
-    ]);
+async function fetchDisplayData(building: string, businessDate: string): Promise<DisplayData> {
+  const [
+    { data: calledRows },
+    { data: admissionRows },
+    { data: waitingRows },
+    { count: totalToday },
+    { count: waiting },
+    { count: called },
+  ] = await Promise.all([
+    supabase
+      .from("tickets")
+      .select("ticket_number, counter_number, called_at")
+      .eq("building", building)
+      .eq("business_date", businessDate)
+      .eq("status", "CALLED")
+      .order("called_at", { ascending: false })
+      .limit(5),
+    supabase
+      .from("tickets")
+      .select("ticket_number, program, admission_called_at")
+      .eq("building", building)
+      .eq("business_date", businessDate)
+      .eq("status", "CALLED_BY_ADMISSION")
+      .order("admission_called_at", { ascending: false })
+      .limit(5),
+    supabase
+      .from("tickets")
+      .select("ticket_number")
+      .eq("building", building)
+      .eq("business_date", businessDate)
+      .eq("status", "PRINTED")
+      .is("called_at", null)
+      .order("ticket_number", { ascending: true })
+      .limit(6),
+    supabase
+      .from("tickets")
+      .select("uuid", { count: "exact", head: true })
+      .eq("building", building)
+      .eq("business_date", businessDate)
+      .in("status", ISSUED_STATUSES),
+    supabase
+      .from("tickets")
+      .select("uuid", { count: "exact", head: true })
+      .eq("building", building)
+      .eq("business_date", businessDate)
+      .eq("status", "PRINTED")
+      .is("called_at", null),
+    supabase
+      .from("tickets")
+      .select("uuid", { count: "exact", head: true })
+      .eq("building", building)
+      .eq("business_date", businessDate)
+      .in("status", CALLED_STATUSES),
+  ]);
+
+  const merged: CalledEntry[] = [
+    ...(calledRows || []).map(
+      (r): CalledEntry => ({
+        kind: "counter",
+        ticketNumber: r.ticket_number,
+        at: r.called_at,
+        counterNumber: r.counter_number,
+      })
+    ),
+    ...(admissionRows || []).map(
+      (r): CalledEntry => ({
+        kind: "admission",
+        ticketNumber: r.ticket_number,
+        at: r.admission_called_at,
+        program: r.program,
+      })
+    ),
+  ]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, 5);
 
   return {
-    recentlyCalled: calledRows || [],
+    recentlyCalled: merged,
     nextNumbers: (waitingRows || []).map((r) => r.ticket_number),
     stats: {
       totalToday: totalToday ?? 0,
@@ -83,14 +153,13 @@ export default function DisplayPage() {
   const [offline, setOffline] = useState(false);
   const [flash, setFlash] = useState(false);
   const [soundAvailable, setSoundAvailable] = useState(false);
-  // Both `todayBusinessDate()` (depends on the machine's local clock —
-  // the build server and a visitor's browser can disagree, especially
-  // near midnight) and `speechAvailable()` (reads `window`, absent
-  // during the static server-rendered shell) must NOT be computed
-  // during the initial render, or that render won't match what the
-  // server already sent down — a React hydration error. Both start
-  // blank/false and get filled in from an effect, which only runs
+  // null = still reading localStorage; "" = read, nothing chosen yet.
+  // Both this and `todayBusinessDate()`/`speechAvailable()` must NOT be
+  // computed during the initial render, or that render won't match
+  // what the server already sent down — a React hydration error. All
+  // start blank and get filled in from an effect, which only runs
   // after hydration completes.
+  const [building, setBuilding] = useState<string | null>(null);
   const [businessDate, setBusinessDate] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoiceURI, setSelectedVoiceURIState] = useState("");
@@ -99,6 +168,7 @@ export default function DisplayPage() {
   const lastCalledAt = useRef<string | null>(null);
 
   useEffect(() => {
+    setBuilding(getSelectedBuilding());
     setBusinessDate(todayBusinessDate());
     const available = speechAvailable();
     setSoundAvailable(available);
@@ -119,28 +189,47 @@ export default function DisplayPage() {
     announceTest(); // preview immediately so it's obvious what changed
   }
 
-  const refresh = useCallback(async () => {
-    if (!businessDate) return;
-    try {
-      const next = await fetchDisplayData(businessDate);
+  function chooseBuilding(value: string) {
+    setSelectedBuilding(value);
+    setBuilding(value);
+    lastCalledAt.current = null; // fresh building — don't announce its history as new
+    setData(EMPTY);
+  }
 
-      // Anything called after the newest called_at we've already
-      // handled is new. There can be more than one (two counters
-      // calling within the same poll/Realtime tick) — announce all of
-      // them, oldest first, so they play back in the order they
-      // actually happened rather than overlapping or skipping ahead.
+  function changeBuilding() {
+    clearSelectedBuilding();
+    setBuilding("");
+    lastCalledAt.current = null;
+    setData(EMPTY);
+  }
+
+  const refresh = useCallback(async () => {
+    if (!building || !businessDate) return;
+    try {
+      const next = await fetchDisplayData(building, businessDate);
+
+      // Anything called after the newest timestamp we've already
+      // handled is new. There can be more than one (two counters, or a
+      // counter and an admission desk, calling within the same
+      // poll/Realtime tick) — announce all of them, oldest first, so
+      // they play back in the order they actually happened rather than
+      // overlapping or skipping ahead.
       const newCalls = lastCalledAt.current
-        ? next.recentlyCalled.filter((c) => c.called_at > lastCalledAt.current!)
+        ? next.recentlyCalled.filter((c) => c.at > lastCalledAt.current!)
         : [];
       if (lastCalledAt.current !== null && newCalls.length > 0) {
         setFlash(true);
         setTimeout(() => setFlash(false), 1200);
         [...newCalls]
-          .sort((a, b) => a.called_at.localeCompare(b.called_at))
-          .forEach((c) => announceTicket(c.ticket_number, c.counter_number));
+          .sort((a, b) => a.at.localeCompare(b.at))
+          .forEach((c) =>
+            c.kind === "counter"
+              ? announceTicket(c.ticketNumber, c.counterNumber)
+              : announceAdmissionTicket(c.ticketNumber, programLabel(c.program))
+          );
       }
       if (next.recentlyCalled.length > 0) {
-        lastCalledAt.current = next.recentlyCalled[0].called_at; // [0] is the newest (query orders desc)
+        lastCalledAt.current = next.recentlyCalled[0].at; // [0] is the newest (list is sorted desc)
       }
 
       setData(next);
@@ -148,20 +237,22 @@ export default function DisplayPage() {
     } catch {
       setOffline(true);
     }
-  }, [businessDate]);
+  }, [building, businessDate]);
 
   useEffect(() => {
-    if (!businessDate) return;
+    if (!building || !businessDate) return;
     refresh();
 
-    // Realtime push (instant) — any change to today's tickets triggers
-    // a fresh fetch of the computed display payload. A 5s poll is kept
-    // as a safety net in case a realtime event is ever missed.
+    // Realtime push (instant) — any change to this building's tickets
+    // triggers a fresh fetch of the computed display payload. A 5s
+    // poll is kept as a safety net in case a realtime event is ever
+    // missed. Filtered by building (not business_date) so a screen in
+    // one building never even receives another building's events.
     const channel = supabase
-      .channel("tickets-display")
+      .channel(`tickets-display-${building}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "tickets", filter: `business_date=eq.${businessDate}` },
+        { event: "*", schema: "public", table: "tickets", filter: `building=eq.${building}` },
         () => refresh()
       )
       .subscribe();
@@ -171,7 +262,15 @@ export default function DisplayPage() {
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  }, [refresh, businessDate]);
+  }, [refresh, building, businessDate]);
+
+  if (building === null) {
+    return <div className="min-h-screen bg-slate-950" />; // pre-hydration blank, no flash
+  }
+
+  if (!building) {
+    return <BuildingPicker onSelect={chooseBuilding} />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center px-6 py-10 gap-8">
@@ -182,7 +281,15 @@ export default function DisplayPage() {
           <h1 className="text-3xl sm:text-5xl font-extrabold tracking-wide text-blue-300">
             أهلاً بكم في جامعة الزقازيق الأهلية
           </h1>
-          <div className="text-slate-500 mt-1 text-sm">{businessDate}</div>
+          <div className="flex items-center justify-center gap-3 mt-1">
+            <span className="text-slate-500 text-sm">{businessDate}</span>
+            <span className="bg-blue-950/70 border border-blue-800 text-blue-300 text-xs font-bold rounded-full px-3 py-1">
+              مبنى {building} — {buildingLabel(building)}
+            </span>
+            <button onClick={changeBuilding} className="text-slate-500 text-xs underline hover:text-slate-300">
+              تغيير المبنى
+            </button>
+          </div>
         </div>
       </header>
 
@@ -199,37 +306,53 @@ export default function DisplayPage() {
             ) : (
               data.recentlyCalled.map((c, i) => (
                 <div
-                  key={c.called_at}
-                  className={`flex items-center justify-between rounded-2xl px-6 transition-colors duration-700 ${
+                  key={`${c.kind}-${c.at}-${c.ticketNumber}`}
+                  className={`flex items-center justify-between gap-3 rounded-2xl px-6 transition-colors duration-700 ${
                     i === 0
                       ? `py-5 ${flash ? "bg-green-900/60" : "bg-blue-950/60"} border border-blue-800`
                       : "py-3 bg-slate-800/60"
                   }`}
                 >
                   <span className={`font-extrabold ${i === 0 ? "text-[64px] sm:text-[80px]" : "text-3xl sm:text-4xl text-slate-300"}`}>
-                    {c.ticket_number}
+                    {c.ticketNumber}
                   </span>
-                  <span className={`font-bold ${i === 0 ? "text-2xl sm:text-3xl text-blue-300" : "text-lg sm:text-xl text-blue-400"}`}>
-                    مكتب رقم {c.counter_number}
-                  </span>
+                  {c.kind === "counter" ? (
+                    <span className={`font-bold text-end ${i === 0 ? "text-2xl sm:text-3xl text-blue-300" : "text-lg sm:text-xl text-blue-400"}`}>
+                      مكتب رقم {c.counterNumber}
+                    </span>
+                  ) : (
+                    <span className={`font-bold text-end ${i === 0 ? "text-emerald-300" : "text-emerald-400"}`}>
+                      <span className={i === 0 ? "text-2xl sm:text-3xl" : "text-lg sm:text-xl"}>
+                        شؤون الطلاب
+                      </span>
+                      <span className={`block ${i === 0 ? "text-base sm:text-xl" : "text-xs sm:text-sm"} opacity-80`}>
+                        {programLabel(c.program)}
+                      </span>
+                    </span>
+                  )}
                 </div>
               ))
             )}
           </section>
 
-          <section className="bg-slate-900 border-2 border-slate-800 rounded-3xl px-8 py-10 text-center flex flex-col items-center justify-center">
-            <div className="text-slate-400 tracking-widest text-sm sm:text-lg font-bold mb-4">الانتظار</div>
-            <div className="flex flex-wrap justify-center gap-3">
-              {data.nextNumbers.length === 0 ? (
-                <span className="text-slate-500">لا يوجد أحد في الانتظار</span>
-              ) : (
-                data.nextNumbers.map((n) => (
-                  <span key={n} className="bg-slate-800 rounded-xl px-5 py-3 text-2xl sm:text-3xl font-bold">
+          <section className="bg-slate-900 border-2 border-slate-800 rounded-3xl px-6 py-6 flex flex-col gap-3">
+            <div className="text-slate-400 tracking-widest text-sm sm:text-lg font-bold text-center">الانتظار</div>
+            {data.nextNumbers.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center text-slate-500 py-10">
+                لا يوجد أحد في الانتظار
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 content-start">
+                {data.nextNumbers.map((n) => (
+                  <div
+                    key={n}
+                    className="bg-slate-800 rounded-xl py-4 text-2xl sm:text-3xl font-bold text-center"
+                  >
                     {n}
-                  </span>
-                ))
-              )}
-            </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </div>
 

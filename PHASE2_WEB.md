@@ -142,9 +142,13 @@ is what actually restricts it, not secrecy.
 vercel-app/                   # Next.js app — deploy THIS folder's root to Vercel
 ├── app/
 │   ├── page.tsx               # public display (polls via Realtime, "use client")
-│   └── call/page.tsx           # call-next page
+│   ├── call/page.tsx           # first reviewer's call-next page
+│   ├── view/page.tsx           # per-counter served-ticket stats
+│   └── admission/page.tsx      # student affairs — certificate queues (see PHASE3_ADMISSION.md)
 ├── lib/
-│   └── supabaseClient.ts       # browser Supabase client + local-date helper
+│   ├── supabaseClient.ts       # browser Supabase client + local-date helper
+│   ├── speech.ts               # Arabic Web Speech announcements
+│   └── certificates.ts         # the 13 certificate types (mirrors app/core/certificates.py)
 ├── .env.local                  # git-ignored, already configured locally
 └── .env.local.example
 ```
@@ -167,7 +171,8 @@ cd vercel-app
 npm run dev
 ```
 - Display: http://localhost:3000/
-- Call: http://localhost:3000/call
+- Call (first reviewer): http://localhost:3000/call
+- Admission (student affairs): http://localhost:3000/admission
 
 Verified end-to-end against the live `COUNTER` project: inserted 3
 test tickets via SQL, watched them appear on `/` within ~1s via
@@ -179,7 +184,8 @@ to `[2, 3]` — then cleaned the test rows back out.
 
 **Live production URL: https://znu-counter-voice.vercel.app**
 - Display: https://znu-counter-voice.vercel.app/
-- Call: https://znu-counter-voice.vercel.app/call
+- Call (first reviewer): https://znu-counter-voice.vercel.app/call
+- Admission (student affairs): https://znu-counter-voice.vercel.app/admission
 
 This is the project's **stable alias** (visible as "Latest Production
 URL" via `vercel project ls`) — it always points at whatever was most

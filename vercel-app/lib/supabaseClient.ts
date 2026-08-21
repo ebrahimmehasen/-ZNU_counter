@@ -25,3 +25,45 @@ export function todayBusinessDate(): string {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+
+type RpcResponse<T> = { data: T | null; error: { message?: string; code?: string } | null };
+
+/** A weak-connection failure — the request never got a response back
+ * (offline, DNS hiccup, dropped connection, timeout) — vs. an actual
+ * error response FROM Postgres/PostgREST, which always carries a
+ * `code` (e.g. a raised exception, a constraint violation). Only the
+ * former is safe to blindly retry: if `code` is set, the server did
+ * receive and process the request, so retrying could double-apply a
+ * write (most importantly, double-claim a ticket in call_next_ticket /
+ * admission_claim_next) instead of just resending a lost request. */
+function isRetryableNetworkError(error: { message?: string; code?: string } | null): boolean {
+  if (!error || error.code) return false;
+  return /fetch|network|timeout|offline|load failed/i.test(error.message || "");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Wraps a `supabase.rpc(...)` call with up to `attempts` tries on a
+ * flaky connection — see isRetryableNetworkError for exactly what
+ * qualifies for a retry (and why claim-type RPCs are still safe to
+ * wrap with this). Short, fixed backoff between attempts (not
+ * exponential): these are interactive, employee-facing actions, not
+ * background jobs — a few hundred ms is the point, not minutes. */
+export async function rpcWithRetry<T>(
+  fn: () => PromiseLike<RpcResponse<T>>,
+  attempts = 3
+): Promise<RpcResponse<T>> {
+  let last: RpcResponse<T> = { data: null, error: null };
+  for (let i = 0; i < attempts; i++) {
+    try {
+      last = await fn();
+    } catch (e) {
+      last = { data: null, error: { message: e instanceof Error ? e.message : String(e) } };
+    }
+    if (!last.error || !isRetryableNetworkError(last.error)) return last;
+    if (i < attempts - 1) await sleep(300 * (i + 1));
+  }
+  return last;
+}

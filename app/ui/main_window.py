@@ -1,10 +1,18 @@
-"""Phase 1 main window.
+"""Main window.
 
 Everything the employee needs is on one screen: current/next number,
 today's count, printer + sync status, the print button, and a plain
 log so problems are visible without opening a file. See module
 docstrings in core/ticket_service.py and printing/printer_service.py
 for the reliability logic this window drives.
+
+Multi-building: this window (and the whole desktop install it belongs
+to) is pinned to exactly one of the four buildings (B/C/E/F) via
+config.building — see app/config.py and ui/building_dialog.py. The
+building is chosen once on first run and shown at all times in the
+header so an employee glancing at the screen can always tell which
+building's queue they're printing for; changing it is a deliberate,
+occasional action via the "تغيير المبنى" button, never asked per-ticket.
 """
 from __future__ import annotations
 
@@ -14,6 +22,7 @@ from datetime import date
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -28,7 +37,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import AppConfig
+from app.config import AppConfig, save_config
+from app.core.certificates import building_label, get_building, program_label
 from app.core.database import Database
 from app.core.models import TicketStatus
 from app.core.session_service import SessionService
@@ -39,7 +49,15 @@ from app.printing.printer_service import PrintError
 from app.printing.ticket_image import TicketImageError
 from app.sync.supabase_client import SupabaseSyncClient, SupabaseUnavailable
 from app.sync.sync_manager import SyncManager
+from app.ui.building_dialog import ask_for_building
+from app.ui.certificate_dialog import ask_for_program
+from app.ui.print_mode_dialog import PREPRINTED, PRINTER, ask_for_print_mode
 from app.ui.styles import STYLESHEET
+
+# How long an employee has to undo a just-pulled number in "preprinted"
+# mode (config.print_mode == PREPRINTED) before it's treated as issued.
+# See _print_next / _start_preprinted_undo_window.
+PREPRINTED_UNDO_SECONDS = 5
 
 logger = get_logger("ui")
 
@@ -95,6 +113,36 @@ class MainWindow(QMainWindow):
         self._log_bridge.message.connect(self._append_log)
         logging.getLogger("queue_system").addHandler(_QtLogHandler(self._log_bridge))
 
+        # This device must have a building before it can reserve/print
+        # a single ticket — every row synced to Supabase needs one (see
+        # supabase/schema.sql's chk_tickets_building_program). Ask now,
+        # non-cancellably, if config.yaml doesn't already have one.
+        if not self.config.building:
+            chosen = ask_for_building(self, allow_cancel=False)
+            self.config.building = chosen
+            try:
+                save_config(self.config)
+            except Exception:
+                logger.exception("Failed to save building selection to config.yaml")
+        self._update_building_label()
+
+        # Same reasoning as the building prompt above: ask once, up
+        # front, non-cancellably, if config.yaml doesn't already say
+        # how this device issues numbers.
+        if not self.config.print_mode:
+            chosen_mode = ask_for_print_mode(self, allow_cancel=False)
+            self.config.print_mode = chosen_mode
+            try:
+                save_config(self.config)
+            except Exception:
+                logger.exception("Failed to save print mode selection to config.yaml")
+        self._update_print_mode_label()
+
+        self._preprinted_ticket = None
+        self._preprinted_seconds_left = 0
+        self._preprinted_countdown_timer = QTimer(self)
+        self._preprinted_countdown_timer.timeout.connect(self._on_preprinted_countdown_tick)
+
         db_path = config.resolve_path(config.database.path)
         self.db = Database(db_path)
         self.session_service = SessionService(self.db)
@@ -103,6 +151,7 @@ class MainWindow(QMainWindow):
 
         self.session = self.session_service.get_or_create_today()
         logger.info("Business session ready: %s (id=%s)", self.session.business_date, self.session.id)
+        logger.info("This device serves building %s (%s)", self.config.building, building_label(self.config.building))
 
         self.sync_manager = None
         if config.sync.enabled:
@@ -123,6 +172,7 @@ class MainWindow(QMainWindow):
         self._date_check_timer.timeout.connect(self._check_day_rollover)
         self._date_check_timer.start(30_000)
 
+        self._populate_printer_combo()
         self._refresh_all()
 
         # Deferred so the window shows up first — this makes one
@@ -156,6 +206,36 @@ class MainWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(subtitle)
 
+        # Building banner: always visible, so an employee glancing at
+        # the screen can tell at a glance which building this device is
+        # printing for — and can fix a wrong setup immediately via the
+        # button beside it, rather than discovering it after printing.
+        building_row = QHBoxLayout()
+        self.building_label = QLabel()
+        self.building_label.setObjectName("buildingLabel")
+        self.building_label.setAlignment(Qt.AlignCenter)
+        building_row.addWidget(self.building_label, 1)
+        self.change_building_button = QPushButton("تغيير المبنى")
+        self.change_building_button.setObjectName("changeBuildingButton")
+        self.change_building_button.clicked.connect(self._on_change_building_clicked)
+        building_row.addWidget(self.change_building_button)
+        layout.addLayout(building_row)
+
+        # Print-mode banner: same idea as the building banner above —
+        # always visible so it's obvious whether "طباعة" actually
+        # prints or just pulls the next number, and easy to fix if a
+        # machine was set up wrong.
+        print_mode_row = QHBoxLayout()
+        self.print_mode_label = QLabel()
+        self.print_mode_label.setObjectName("buildingLabel")
+        self.print_mode_label.setAlignment(Qt.AlignCenter)
+        print_mode_row.addWidget(self.print_mode_label, 1)
+        self.change_print_mode_button = QPushButton("تغيير طريقة الطباعة")
+        self.change_print_mode_button.setObjectName("changeBuildingButton")
+        self.change_print_mode_button.clicked.connect(self._on_change_print_mode_clicked)
+        print_mode_row.addWidget(self.change_print_mode_button)
+        layout.addLayout(print_mode_row)
+
         self.date_label = QLabel()
         self.date_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.date_label)
@@ -180,6 +260,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.warning_frame)
         self.warning_frame.hide()
 
+        # Preprinted-mode undo banner: shown for a few seconds right
+        # after pulling a number in "preprinted" mode (config.print_mode
+        # == PREPRINTED), where there's no printer failure to catch a
+        # mis-tap the way there is in printer mode — see _print_next.
+        self.preprinted_undo_frame = QFrame()
+        self.preprinted_undo_frame.setObjectName("warningBanner")
+        pl = QVBoxLayout(self.preprinted_undo_frame)
+        self.preprinted_undo_label = QLabel()
+        self.preprinted_undo_label.setWordWrap(True)
+        self.preprinted_undo_label.setAlignment(Qt.AlignCenter)
+        pl.addWidget(self.preprinted_undo_label)
+        self.preprinted_undo_button = QPushButton("تراجع عن هذا الرقم")
+        self.preprinted_undo_button.setObjectName("cancelButton")
+        self.preprinted_undo_button.clicked.connect(self._on_preprinted_undo_clicked)
+        pl.addWidget(self.preprinted_undo_button)
+        layout.addWidget(self.preprinted_undo_frame)
+        self.preprinted_undo_frame.hide()
+
         # Current number card
         current_card = self._card()
         cc_layout = QVBoxLayout(current_card)
@@ -189,8 +287,16 @@ class MainWindow(QMainWindow):
         self.current_number_label = QLabel("—")
         self.current_number_label.setObjectName("bigNumber")
         self.current_number_label.setAlignment(Qt.AlignCenter)
+        # Confirms which program the number that just came out of the
+        # printer was issued for — the employee's only chance to
+        # notice a mis-tap before handing the ticket over.
+        self.current_program_label = QLabel("")
+        self.current_program_label.setObjectName("certificateLabel")
+        self.current_program_label.setAlignment(Qt.AlignCenter)
+        self.current_program_label.setWordWrap(True)
         cc_layout.addWidget(cc_label)
         cc_layout.addWidget(self.current_number_label)
+        cc_layout.addWidget(self.current_program_label)
         layout.addWidget(current_card)
 
         # Next number card
@@ -215,8 +321,28 @@ class MainWindow(QMainWindow):
         # Printer + sync status row
         status_card = self._card()
         sc_layout = QVBoxLayout(status_card)
-        self.printer_name_label = QLabel()
-        sc_layout.addWidget(self.printer_name_label)
+
+        printer_row = QHBoxLayout()
+        printer_label = QLabel("الطابعة:")
+        printer_row.addWidget(printer_label)
+        # Explicit pick, persisted to config.yaml — Windows silently
+        # reassigning its own "default printer" (e.g. to Microsoft
+        # Print to PDF when the real printer is unplugged) must not
+        # change what this app prints to. Selecting an entry here is
+        # a deliberate override that survives restarts and outlives
+        # the printer being unplugged/replugged.
+        self.printer_combo = QComboBox()
+        self.printer_combo.setObjectName("printerCombo")
+        self.printer_combo.currentIndexChanged.connect(self._on_printer_selected)
+        printer_row.addWidget(self.printer_combo, 1)
+        self.printer_refresh_button = QPushButton("⟳")
+        self.printer_refresh_button.setObjectName("printerRefreshButton")
+        self.printer_refresh_button.setFixedWidth(36)
+        self.printer_refresh_button.setToolTip("تحديث قائمة الطابعات")
+        self.printer_refresh_button.clicked.connect(self._on_printer_refresh_clicked)
+        printer_row.addWidget(self.printer_refresh_button)
+        sc_layout.addLayout(printer_row)
+
         self.printer_status_label = QLabel()
         sc_layout.addWidget(self.printer_status_label)
         self.sync_status_label = QLabel("المزامنة: —")
@@ -308,6 +434,23 @@ class MainWindow(QMainWindow):
 
     # ---- refresh / state -------------------------------------------------
 
+    def _update_building_label(self) -> None:
+        building = get_building(self.config.building)
+        if building is None:
+            self.building_label.setText("لم يتم اختيار مبنى")
+        else:
+            self.building_label.setText(f"مبنى {building.value} — {building.label}")
+
+    def _update_print_mode_label(self) -> None:
+        if self.config.print_mode == PREPRINTED:
+            self.print_mode_label.setText("وضع الطباعة: أرقام مطبوعة جاهزة")
+            self.print_button.setText("سحب الرقم التالي")
+        elif self.config.print_mode == PRINTER:
+            self.print_mode_label.setText("وضع الطباعة: طابعة")
+            self.print_button.setText("طباعة التذكرة التالية")
+        else:
+            self.print_mode_label.setText("لم يتم اختيار طريقة طباعة")
+
     def _refresh_all(self) -> None:
         # ⁦/⁩ (LTR isolate) keep "2026-08-10" from being
         # visually reordered by the bidi algorithm inside the
@@ -319,14 +462,15 @@ class MainWindow(QMainWindow):
         self.current_number_label.setText(
             str(stats["current_number"]) if stats["current_number"] else "—"
         )
+        self.current_program_label.setText(
+            program_label(stats["current_program"]) if stats["current_number"] else ""
+        )
         self.next_number_label.setText(str(stats["next_number"]))
         self.today_count_label.setText(str(stats["today_count"]))
         self.last_printed_label.setText(
             str(stats["current_number"]) if stats["current_number"] else "—"
         )
 
-        printer_name = self.config.printer.name or (printer_service.get_default_printer() or "")
-        self.printer_name_label.setText(f"الطابعة: {printer_name or 'غير محددة'}")
         available = printer_service.printer_is_available(self.config.printer.name)
         if available:
             self.printer_status_label.setText("حالة الطابعة: جاهزة")
@@ -352,13 +496,29 @@ class MainWindow(QMainWindow):
                     f"فشلت طباعة التذكرة رقم {unresolved.ticket_number}: "
                     f"{unresolved.error_message or 'خطأ غير معروف'}"
                 )
-            self.retry_button.setText(f"إعادة طباعة الرقم {unresolved.ticket_number}")
+            # The program is fixed at reservation time, so a retry
+            # reprints the same number for the same program — no need
+            # to ask again, but do show it so the employee can see what
+            # they're about to hand over.
+            self.retry_button.setText(
+                f"إعادة طباعة الرقم {unresolved.ticket_number}"
+                f" ({program_label(unresolved.program)})"
+            )
             self.print_button.setEnabled(False)
             self.test_button.setEnabled(False)
         else:
             self.warning_frame.hide()
             self.print_button.setEnabled(True)
             self.test_button.setEnabled(True)
+
+        # A number pulled in preprinted mode is still inside its
+        # undo window — keep both buttons locked no matter what
+        # triggered this refresh (day rollover, printer refresh, etc.),
+        # so a second number can't be pulled before the first is
+        # confirmed or undone. See _start_preprinted_undo_window.
+        if self._preprinted_ticket is not None:
+            self.print_button.setEnabled(False)
+            self.test_button.setEnabled(False)
 
     def _append_log(self, line: str) -> None:
         self.log_panel.append(line)
@@ -368,6 +528,93 @@ class MainWindow(QMainWindow):
             self.session = self.session_service.get_or_create_today()
             logger.info("New business day started: %s", self.session.business_date)
             self._refresh_all()
+
+    def _populate_printer_combo(self, keep_selection: bool = False) -> None:
+        """(Re)lists the printers Windows currently reports and re-selects
+        whichever one is configured. `keep_selection` is used by the
+        manual refresh button: if the previously-selected printer is
+        gone from the new list (unplugged), it falls back to the
+        configured name once that printer reappears rather than
+        silently switching to something else."""
+        target = self.config.printer.name
+        printers = printer_service.list_printers()
+
+        self.printer_combo.blockSignals(True)
+        self.printer_combo.clear()
+        self.printer_combo.addItem("(افتراضي Windows)", "")
+        for name in printers:
+            self.printer_combo.addItem(name, name)
+        idx = self.printer_combo.findData(target)
+        self.printer_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.printer_combo.blockSignals(False)
+
+    def _on_printer_refresh_clicked(self) -> None:
+        self._populate_printer_combo(keep_selection=True)
+        self._refresh_all()
+        logger.info("🔄 Printer list refreshed")
+
+    def _on_printer_selected(self, index: int) -> None:
+        name = self.printer_combo.itemData(index) or ""
+        if name == self.config.printer.name:
+            return
+        self.config.printer.name = name
+        try:
+            save_config(self.config)
+            logger.info("🖨️ Printer set to: %s", name or "(Windows default)")
+        except Exception:
+            logger.exception("Failed to save printer selection to config.yaml")
+        self._refresh_all()
+
+    def _on_change_building_clicked(self) -> None:
+        if self._preprinted_ticket is not None:
+            QMessageBox.information(
+                self,
+                "تغيير المبنى",
+                "في رقم لسه في فترة التراجع — استنى ثواني أو دوس تراجع الأول.",
+            )
+            return
+        chosen = ask_for_building(self, allow_cancel=True)
+        if chosen is None or chosen == self.config.building:
+            return
+        old = self.config.building
+        self.config.building = chosen
+        try:
+            save_config(self.config)
+        except Exception:
+            logger.exception("Failed to save building selection to config.yaml")
+        self._update_building_label()
+        logger.info(
+            "🏢 Building changed: %s (%s) → %s (%s)",
+            old, building_label(old), chosen, building_label(chosen),
+        )
+        QMessageBox.information(
+            self,
+            "تغيير المبنى",
+            f"تم تغيير المبنى إلى: {building_label(chosen)}.\n"
+            "التذاكر اللي هتتطبع من دلوقتي هتتسجل على المبنى الجديد.",
+        )
+        # A stale reconciliation check against the old building's
+        # sequence would be meaningless now — re-run it for the new one.
+        QTimer.singleShot(100, self._reconcile_with_server)
+
+    def _on_change_print_mode_clicked(self) -> None:
+        if self._preprinted_ticket is not None:
+            QMessageBox.information(
+                self,
+                "تغيير طريقة الطباعة",
+                "في رقم لسه في فترة التراجع — استنى ثواني أو دوس تراجع الأول.",
+            )
+            return
+        chosen = ask_for_print_mode(self, allow_cancel=True)
+        if chosen is None or chosen == self.config.print_mode:
+            return
+        self.config.print_mode = chosen
+        try:
+            save_config(self.config)
+        except Exception:
+            logger.exception("Failed to save print mode selection to config.yaml")
+        self._update_print_mode_label()
+        logger.info("🖨️ Print mode changed to: %s", chosen)
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -388,16 +635,18 @@ class MainWindow(QMainWindow):
 
     def _reconcile_with_server(self) -> None:
         """Best-effort startup check: if Supabase already has a higher
-        ticket_number for today than this local database does (e.g.
-        queue.db was lost/reset while the cloud mirror had newer synced
-        tickets), raise the local numbering floor to match — see
-        ticket_service.reconcile_sequence_floor. Never blocks/breaks
-        printing: any failure here (offline, misconfigured, whatever)
-        is just logged and otherwise ignored."""
-        if not self.config.supabase.configured:
+        ticket_number for this building/today than this local database
+        does (e.g. queue.db was lost/reset while the cloud mirror had
+        newer synced tickets), raise the local numbering floor to match
+        — see ticket_service.reconcile_sequence_floor. Never blocks/
+        breaks printing: any failure here (offline, misconfigured,
+        whatever) is just logged and otherwise ignored."""
+        if not self.config.supabase.configured or not self.config.building:
             return
         try:
-            remote_max = self.supabase_client.get_max_ticket_number(self.session.business_date)
+            remote_max = self.supabase_client.get_max_ticket_number(
+                self.config.building, self.session.business_date
+            )
             if remote_max is None:
                 return
             marker = self.ticket_service.reconcile_sequence_floor(
@@ -427,16 +676,84 @@ class MainWindow(QMainWindow):
         self._print_next(test=True)
 
     def _print_next(self, test: bool) -> None:
+        # Ask for the program BEFORE reserving anything: cancelling the
+        # picker must leave the sequence untouched, so a mis-click on
+        # the print button can never burn a ticket number. For a
+        # single-program building (C) this returns immediately without
+        # showing any dialog at all — see ask_for_program.
+        program = ask_for_program(
+            self,
+            self.config.building,
+            "اختر البرنامج (رقم تجريبي)" if test else None,
+        )
+        if program is None:
+            logger.info("Program selection cancelled — no number was reserved")
+            return
+
         self.error_label.setText("")
         self.print_button.setEnabled(False)
         self.test_button.setEnabled(False)
         try:
-            ticket = self.ticket_service.reserve_next_ticket(self.session.id)
-            logger.info("Reserved ticket #%s", ticket.ticket_number)
+            ticket = self.ticket_service.reserve_next_ticket(
+                self.session.id, self.config.building, program
+            )
+            logger.info(
+                "Reserved ticket #%s (%s)", ticket.ticket_number, program_label(program)
+            )
+            if not test and self.config.print_mode == PREPRINTED:
+                # No printer involved: the paper ticket already exists,
+                # so the number is issued immediately — the only risk is
+                # a mis-tap, which the undo window below covers instead
+                # of a print failure the way printer mode does.
+                self.ticket_service.mark_printed(ticket.id, "PREPRINTED")
+                logger.info("📝 Ticket #%s issued (preprinted mode)", ticket.ticket_number)
+                self._start_preprinted_undo_window(ticket)
+                return
             self._refresh_all()
             self._do_print(ticket, test=test)
         finally:
             self._refresh_all()
+
+    def _start_preprinted_undo_window(self, ticket) -> None:
+        self._preprinted_ticket = ticket
+        self._preprinted_seconds_left = PREPRINTED_UNDO_SECONDS
+        self.preprinted_undo_frame.show()
+        self._render_preprinted_undo_label()
+        self._preprinted_countdown_timer.start(1000)
+        self._refresh_all()
+
+    def _render_preprinted_undo_label(self) -> None:
+        self.preprinted_undo_label.setText(
+            f"التذكرة رقم {self._preprinted_ticket.ticket_number} — "
+            f"تقدر تتراجع خلال {self._preprinted_seconds_left} ثانية"
+        )
+
+    def _on_preprinted_countdown_tick(self) -> None:
+        self._preprinted_seconds_left -= 1
+        if self._preprinted_seconds_left <= 0:
+            self._finalize_preprinted_ticket()
+            return
+        self._render_preprinted_undo_label()
+
+    def _finalize_preprinted_ticket(self) -> None:
+        self._preprinted_countdown_timer.stop()
+        ticket = self._preprinted_ticket
+        self._preprinted_ticket = None
+        self.preprinted_undo_frame.hide()
+        if ticket is not None and self.sync_manager is not None:
+            self.sync_manager.trigger()
+        self._refresh_all()
+
+    def _on_preprinted_undo_clicked(self) -> None:
+        ticket = self._preprinted_ticket
+        if ticket is None:
+            return
+        self._preprinted_countdown_timer.stop()
+        self._preprinted_ticket = None
+        self.preprinted_undo_frame.hide()
+        self.ticket_service.cancel_ticket(ticket.id, "Undone by employee (preprinted mode)")
+        logger.warning("↩️ Ticket #%s undone (preprinted mode) — number skipped", ticket.ticket_number)
+        self._refresh_all()
 
     def _on_retry_clicked(self) -> None:
         # Test-mode prints can't fail (no printer/template call to
@@ -475,8 +792,9 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.warning(
             self,
             "إعادة تعيين النظام",
-            f"هل أنت متأكد؟ هذا هيمسح كل تذاكر اليوم ({self.session.business_date}) محليًا "
-            "وعلى السيرفر، ويرجّع الترقيم لرقم 1. الإجراء ده مش رجعة.",
+            f"هل أنت متأكد؟ هذا هيمسح كل تذاكر مبنى {building_label(self.config.building)} "
+            f"اليوم ({self.session.business_date}) محليًا وعلى السيرفر، ويرجّع الترقيم لرقم 1. "
+            "باقي المباني مش هتتأثر. الإجراء ده مش رجعة.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -488,7 +806,9 @@ class MainWindow(QMainWindow):
 
         if self.config.supabase.configured:
             try:
-                self.supabase_client.admin_reset_business_date(self.session.business_date, ADMIN_PASSWORD)
+                self.supabase_client.admin_reset_business_date(
+                    self.config.building, self.session.business_date, ADMIN_PASSWORD
+                )
                 logger.info("🗑️ Admin reset: cleared server tickets for %s", self.session.business_date)
             except SupabaseUnavailable as e:
                 logger.warning("🗑️ Admin reset: server-side reset failed (local reset still applied): %s", e)
@@ -521,6 +841,8 @@ class MainWindow(QMainWindow):
                 ticket.ticket_number,
                 temp_dir,
                 self.config.template.number_padding,
+                building=ticket.building,
+                program=ticket.program,
             )
             printer_service.print_image(
                 composited_path,

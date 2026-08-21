@@ -26,6 +26,11 @@ sequence of operations is deliberate:
 Sequential numbers are computed as MAX(ticket_number) for the session,
 which includes RESERVED/PRINT_FAILED/CANCELLED rows — so numbering
 only ever moves forward, regardless of prior failures.
+
+Multi-building note: numbering stays scoped to `session_id` only (one
+sequence per business day), same as before the multi-building change —
+see database.py's module docstring for why that's still correct once
+each desktop install is pinned to exactly one building.
 """
 from __future__ import annotations
 
@@ -48,7 +53,22 @@ class TicketService:
 
     # ---- ticket numbering / printing lifecycle -------------------------
 
-    def reserve_next_ticket(self, session_id: int) -> Ticket:
+    def reserve_next_ticket(
+        self,
+        session_id: int,
+        building: Optional[str] = None,
+        program: Optional[str] = None,
+    ) -> Ticket:
+        """`building` is this device's configured building (see
+        app/config.py) and `program` is the stable id from
+        core/certificates.py's BUILDINGS list, chosen by the employee
+        before printing (or implied automatically for a
+        single-program building — see ui/certificate_dialog.py). Both
+        are stored at reservation time (not after a successful print)
+        so a ticket that fails to print and is retried keeps the same
+        building/program it was issued for, and so the values can
+        never be lost between the two steps. Optional to keep every
+        existing caller/test working."""
         with self.db.transaction() as conn:
             row = conn.execute(
                 "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
@@ -60,8 +80,8 @@ class TicketService:
             cur = conn.execute(
                 """INSERT INTO tickets
                    (uuid, session_id, ticket_number, status, print_attempts,
-                    sync_status, device_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                    sync_status, device_id, building, program, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
                 (
                     ticket_uuid,
                     session_id,
@@ -69,12 +89,16 @@ class TicketService:
                     TicketStatus.RESERVED,
                     SyncStatus.PENDING_SYNC,
                     self.db.device_id,
+                    building,
+                    program,
                     now,
                     now,
                 ),
             )
             ticket_id = cur.lastrowid
-            self._log_event(conn, ticket_id, "RESERVED", now)
+            self._log_event(
+                conn, ticket_id, "RESERVED", now, {"building": building, "program": program}
+            )
             row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
         return Ticket.from_row(row)
 
@@ -193,18 +217,22 @@ class TicketService:
     # ---- status / stats for the UI -------------------------------------
 
     def get_today_stats(self, session_id: int) -> dict:
-        # "printed today" means successfully printed at any point, regardless
-        # of whether it has since been called (PRINTED or CALLED) — a ticket
-        # moving through the public-queue lifecycle must not disappear from
-        # the printer app's own counters.
+        # "printed today" means successfully printed at any point, no matter
+        # how far down the workflow it has since travelled (called by the
+        # first reviewer, queued for admission, completed) — a ticket
+        # moving through the queue lifecycle must not disappear from the
+        # printer app's own counters. Hence TicketStatus.ISSUED rather
+        # than an inline list that would need editing per new status.
+        issued = TicketStatus.ISSUED
+        placeholders = ", ".join("?" * len(issued))
         last_printed = self.db.execute(
-            """SELECT * FROM tickets WHERE session_id=? AND status IN (?, ?)
+            f"""SELECT * FROM tickets WHERE session_id=? AND status IN ({placeholders})
                ORDER BY ticket_number DESC LIMIT 1""",
-            (session_id, TicketStatus.PRINTED, TicketStatus.CALLED),
+            (session_id, *issued),
         ).fetchone()
         count_row = self.db.execute(
-            "SELECT COUNT(*) AS c FROM tickets WHERE session_id=? AND status IN (?, ?)",
-            (session_id, TicketStatus.PRINTED, TicketStatus.CALLED),
+            f"SELECT COUNT(*) AS c FROM tickets WHERE session_id=? AND status IN ({placeholders})",
+            (session_id, *issued),
         ).fetchone()
         max_row = self.db.execute(
             "SELECT COALESCE(MAX(ticket_number), 0) AS m FROM tickets WHERE session_id=?",
@@ -216,6 +244,7 @@ class TicketService:
         ).fetchone()
         return {
             "current_number": last_printed["ticket_number"] if last_printed else None,
+            "current_program": last_printed["program"] if last_printed else None,
             "next_number": max_row["m"] + 1,
             "today_count": count_row["c"],
             "last_printed_at": last_printed["printed_at"] if last_printed else None,

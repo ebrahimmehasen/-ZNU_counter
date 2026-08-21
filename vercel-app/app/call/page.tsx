@@ -1,47 +1,133 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { rpcWithRetry, supabase, todayBusinessDate } from "@/lib/supabaseClient";
+import { buildingLabel, clearSelectedBuilding, getSelectedBuilding, programLabel, setSelectedBuilding } from "@/lib/buildings";
+import BuildingPicker from "@/components/BuildingPicker";
+import RecallButton from "@/components/RecallButton";
+
+const RECALL_LOCKED_MESSAGE = "اطلب الرقم اللي بعده شكله روح متتعبناش";
+
+// "مفيش حد مستنّي" escalates the more times in a row "اطلب رقم جديد"
+// comes back empty — see emptyStreak below. Caps at the last message
+// rather than continuing to escalate forever.
+const EMPTY_QUEUE_MESSAGES = ["مفيش حد مستنّي دلوقتي.", "ريح صباعك.", "ما قلنا مفيش حد متقرفناش 😒"];
 
 const STORAGE_KEY = "queue_counter_number";
 
-type Result =
-  | { kind: "success"; ticketNumber: number }
+type CurrentTicket = { ticketNumber: number; program: string | null } | null;
+
+type Message =
   | { kind: "empty" }
-  | { kind: "error"; message: string }
+  | { kind: "finished"; ticketNumber: number }
+  | { kind: "error"; text: string }
   | null;
 
 // No sound on this page on purpose — this is the employee's own
 // screen. The announcement plays on the public display page instead
 // (see app/page.tsx), which is what the waiting room actually hears.
+//
+// This is a deliberate two-step flow, not one "next" button:
+// 1. "اطلب رقم جديد" claims the next waiting ticket (call_next_ticket).
+// 2. While serving it, the SAME button becomes "تمت المراجعة" —
+//    pressing it only files the current student into their program
+//    queue (finish_first_review); it does NOT also call a new one.
+//    The button then reverts to step 1.
+// A reviewer finishing with a student doesn't mean they're ready for
+// the next one immediately (paperwork, a break) — collapsing both into
+// one click was the bug this two-step shape exists to avoid. See
+// finish_first_review() / call_next_ticket() in supabase/schema.sql.
+//
+// Multi-building: this whole page is scoped to one building, chosen
+// once (BuildingPicker below) and remembered per browser, same pattern
+// as the counter number. Every RPC call is scoped to it server-side —
+// see p_building in supabase/schema.sql — so a mis-set counter number
+// can never call a ticket from the wrong building.
 export default function CallPage() {
+  // null = still reading localStorage; "" = read, nothing chosen yet.
+  const [building, setBuilding] = useState<string | null>(null);
   const [counterNumber, setCounterNumber] = useState<number | null>(null);
   const [setupValue, setSetupValue] = useState("1");
   const [servedCount, setServedCount] = useState(0);
+  const [current, setCurrent] = useState<CurrentTicket>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<Result>(null);
+  const [message, setMessage] = useState<Message>(null);
+
+  // "المناداة مرة أخرى" state — see components/RecallButton.tsx.
+  // lastCallAt is the epoch ms of the initial call OR the most recent
+  // recall (whichever is later); recallCount resets to 0 every time a
+  // genuinely new ticket is called (never on a recall of the same one).
+  const [lastCallAt, setLastCallAt] = useState<number | null>(null);
+  const [recallCount, setRecallCount] = useState(0);
+
+  // Consecutive "اطلب رقم جديد" presses that came back empty — resets
+  // to 0 the moment a real ticket is claimed. Drives which message in
+  // EMPTY_QUEUE_MESSAGES is shown (see requestNext / the render below).
+  const [emptyStreak, setEmptyStreak] = useState(0);
 
   // Remembered per-device, so the employee at this counter only sets
   // it up once — reopening the page later goes straight to the call
   // screen, not back through setup.
   useEffect(() => {
+    setBuilding(getSelectedBuilding());
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) setCounterNumber(parseInt(saved, 10));
   }, []);
 
-  const refreshServedCount = useCallback(async (counter: number) => {
+  function chooseBuilding(value: string) {
+    setSelectedBuilding(value);
+    setBuilding(value);
+  }
+
+  function changeBuilding() {
+    clearSelectedBuilding();
+    setBuilding("");
+  }
+
+  // Re-derived from the server, not just kept in React state — a page
+  // refresh while mid-review must land back on "تمت المراجعة" for the
+  // same student, not silently forget they're being served and offer
+  // "اطلب رقم جديد" again (which would double-claim a new ticket while
+  // the old one is still sitting there uncompleted).
+  const refreshCurrent = useCallback(async (b: string, counter: number) => {
+    const { data } = await supabase
+      .from("tickets")
+      .select("ticket_number, program, called_at")
+      .eq("building", b)
+      .eq("business_date", todayBusinessDate())
+      .eq("status", "CALLED")
+      .eq("counter_number", counter)
+      .order("called_at", { ascending: false })
+      .limit(1);
+    const row = data?.[0];
+    setCurrent(row ? { ticketNumber: row.ticket_number, program: row.program } : null);
+    // This only ever runs once, on page load (see the effect below) —
+    // not on a poll — so it's safe to unconditionally (re)start the
+    // recall cooldown from the ticket's real called_at rather than
+    // needing to guard against clobbering an in-progress countdown.
+    setLastCallAt(row ? new Date(row.called_at).getTime() : null);
+    setRecallCount(0);
+  }, []);
+
+  // Counted by counter_number, not by status='CALLED': a finished
+  // student moves on to WAITING_FOR_ADMISSION/etc. but this counter
+  // should still get credit for having served them (matches /view).
+  const refreshServedCount = useCallback(async (b: string, counter: number) => {
     const { count } = await supabase
       .from("tickets")
       .select("uuid", { count: "exact", head: true })
+      .eq("building", b)
       .eq("business_date", todayBusinessDate())
-      .eq("status", "CALLED")
       .eq("counter_number", counter);
     setServedCount(count ?? 0);
   }, []);
 
   useEffect(() => {
-    if (counterNumber !== null) refreshServedCount(counterNumber);
-  }, [counterNumber, refreshServedCount]);
+    if (building && counterNumber !== null) {
+      refreshCurrent(building, counterNumber);
+      refreshServedCount(building, counterNumber);
+    }
+  }, [building, counterNumber, refreshCurrent, refreshServedCount]);
 
   function confirmSetup() {
     const n = parseInt(setupValue, 10);
@@ -53,38 +139,127 @@ export default function CallPage() {
   function changeCounter() {
     localStorage.removeItem(STORAGE_KEY);
     setCounterNumber(null);
-    setResult(null);
+    setCurrent(null);
+    setMessage(null);
   }
 
   async function requestNext() {
-    if (counterNumber === null) return;
+    if (!building || counterNumber === null) return;
     setBusy(true);
-    setResult(null);
+    setMessage(null);
     try {
-      const { data, error } = await supabase.rpc("call_next_ticket", {
-        p_business_date: todayBusinessDate(),
-        p_counter_number: counterNumber,
-      });
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("call_next_ticket", {
+          p_building: building,
+          p_business_date: todayBusinessDate(),
+          p_counter_number: counterNumber,
+        })
+      );
       if (error) throw error;
 
-      if (!data || data.length === 0) {
-        setResult({ kind: "empty" });
+      const row = data?.[0];
+      if (!row || row.out_ticket_number === null) {
+        setMessage({ kind: "empty" });
+        setCurrent(null);
+        setEmptyStreak((s) => s + 1);
       } else {
-        const ticketNumber = data[0].out_ticket_number;
-        setResult({ kind: "success", ticketNumber });
-        refreshServedCount(counterNumber);
+        setEmptyStreak(0);
+        // call_next_ticket() (unlike finish_first_review_and_call_next)
+        // doesn't return the program in its result columns — it's the
+        // older, untouched function other callers still rely on, so
+        // its signature isn't changed here. One extra small lookup
+        // instead.
+        const { data: ticketRow } = await supabase
+          .from("tickets")
+          .select("program")
+          .eq("building", building)
+          .eq("business_date", todayBusinessDate())
+          .eq("ticket_number", row.out_ticket_number)
+          .single();
+        setCurrent({
+          ticketNumber: row.out_ticket_number,
+          program: ticketRow?.program ?? null,
+        });
+        setLastCallAt(row.out_called_at ? new Date(row.out_called_at).getTime() : Date.now());
+        setRecallCount(0);
+        refreshServedCount(building, counterNumber);
       }
     } catch (e) {
-      setResult({ kind: "error", message: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
+      setMessage({ kind: "error", text: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
     } finally {
       setBusy(false);
     }
+  }
+
+  async function recallCurrent() {
+    if (!building || counterNumber === null || !current) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("recall_ticket", {
+          p_building: building,
+          p_business_date: todayBusinessDate(),
+          p_counter_number: counterNumber,
+        })
+      );
+      if (error) throw error;
+      const row = data?.[0];
+      if (row?.out_called_at) {
+        setLastCallAt(new Date(row.out_called_at).getTime());
+        setRecallCount((c) => c + 1);
+      }
+    } catch (e) {
+      setMessage({ kind: "error", text: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finishReview() {
+    if (!building || counterNumber === null || !current) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const { data, error } = await rpcWithRetry(() =>
+        supabase.rpc("finish_first_review", {
+          p_building: building,
+          p_business_date: todayBusinessDate(),
+          p_counter_number: counterNumber,
+        })
+      );
+      if (error) throw error;
+
+      const finishedNumber = data?.[0]?.out_finished_ticket_number ?? current.ticketNumber;
+      setMessage({ kind: "finished", ticketNumber: finishedNumber });
+      setCurrent(null);
+      setLastCallAt(null);
+      setRecallCount(0);
+    } catch (e) {
+      setMessage({ kind: "error", text: e instanceof Error ? e.message : "خطأ في الشبكة — حاول تاني." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (building === null) {
+    return <div className="min-h-screen bg-slate-100" />; // pre-hydration blank, no flash
+  }
+
+  if (!building) {
+    return <BuildingPicker onSelect={chooseBuilding} />;
   }
 
   if (counterNumber === null) {
     return (
       <div className="min-h-screen bg-slate-100 text-slate-800 flex items-center justify-center p-6">
         <div className="bg-white border border-slate-200 rounded-2xl shadow-sm px-10 py-9 w-full max-w-sm text-center">
+          <div className="text-xs text-slate-500 mb-3">
+            مبنى {building} — {buildingLabel(building)}{" "}
+            <button onClick={changeBuilding} className="underline hover:text-blue-700 ms-1">
+              (تغيير)
+            </button>
+          </div>
           <h1 className="text-xl font-bold text-blue-900 mb-1">رقم الشباك؟</h1>
           <p className="text-xs text-slate-500 mb-6">
             هيتحفظ على الجهاز ده — مش هيطلب منك تاني كل مرة تفتح الصفحة.
@@ -114,6 +289,12 @@ export default function CallPage() {
     <div className="min-h-screen bg-slate-100 text-slate-800 flex items-center justify-center p-6">
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm px-10 py-9 w-full max-w-sm text-center">
         <div className="text-xs text-slate-500 mb-1">
+          مبنى {building} — {buildingLabel(building)}{" "}
+          <button onClick={changeBuilding} className="underline hover:text-blue-700 ms-1">
+            (تغيير)
+          </button>
+        </div>
+        <div className="text-xs text-slate-500 mb-1">
           شباك رقم <span className="font-bold text-slate-700">{counterNumber}</span>{" "}
           <button onClick={changeCounter} className="underline hover:text-blue-700 ms-1">
             (تغيير)
@@ -126,20 +307,53 @@ export default function CallPage() {
           <div className="text-3xl font-extrabold text-slate-800">{servedCount}</div>
         </div>
 
-        <button
-          onClick={requestNext}
-          disabled={busy}
-          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-extrabold text-lg rounded-lg py-5"
-        >
-          {busy ? "جاري النداء…" : "اطلب رقم جديد"}
-        </button>
+        {current && (
+          <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 mb-4 text-center">
+            <div className="text-xs text-blue-600 font-bold">بتراجع دلوقتي الرقم</div>
+            <div className="text-3xl font-extrabold text-blue-900">{current.ticketNumber}</div>
+            <div className="text-sm font-bold text-blue-700 mt-1">{programLabel(current.program)}</div>
+          </div>
+        )}
 
-        <div className="mt-5 min-h-[24px] text-sm">
-          {result?.kind === "success" && (
-            <span className="text-green-700 font-bold">تم نداء الرقم #{result.ticketNumber}</span>
+        {current ? (
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={finishReview}
+              disabled={busy}
+              className="w-full bg-amber-600 hover:bg-amber-700 disabled:bg-slate-400 text-white font-extrabold text-lg rounded-lg py-5"
+            >
+              {busy ? "جاري الحفظ…" : "تمت المراجعة"}
+            </button>
+            <RecallButton
+              lastCallAt={lastCallAt}
+              recallCount={recallCount}
+              onRecall={recallCurrent}
+              busy={busy}
+              lockedMessage={RECALL_LOCKED_MESSAGE}
+            />
+          </div>
+        ) : (
+          <button
+            onClick={requestNext}
+            disabled={busy}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-extrabold text-lg rounded-lg py-5"
+          >
+            {busy ? "جاري النداء…" : "اطلب رقم جديد"}
+          </button>
+        )}
+
+        <div className="mt-5 min-h-[24px] text-sm flex flex-col gap-2">
+          {message?.kind === "finished" && (
+            <span className="text-slate-500 text-xs">
+              الرقم #{message.ticketNumber} اتحوّل لشؤون الطلاب. اضغط &quot;اطلب رقم جديد&quot; لما تكون جاهز.
+            </span>
           )}
-          {result?.kind === "empty" && <span className="text-amber-700 font-bold">مفيش حد مستنّي دلوقتي.</span>}
-          {result?.kind === "error" && <span className="text-red-700 font-bold">{result.message}</span>}
+          {message?.kind === "empty" && (
+            <span className="text-amber-700 font-bold">
+              {EMPTY_QUEUE_MESSAGES[Math.min(emptyStreak, EMPTY_QUEUE_MESSAGES.length) - 1]}
+            </span>
+          )}
+          {message?.kind === "error" && <span className="text-red-700 font-bold">{message.text}</span>}
         </div>
       </div>
     </div>

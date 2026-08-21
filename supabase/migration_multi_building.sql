@@ -1,3 +1,12 @@
+-- Historical snapshot: the multi-building migration (2026).
+--
+-- This file is identical to supabase/schema.sql as of the migration
+-- that added buildings B/C/E/F and replaced certificate_type with
+-- program. Kept here as a dated record, same convention as the other
+-- migration_*.sql files in this folder — schema.sql itself is the one
+-- file you actually need to run (it's fully idempotent: safe to run
+-- against a fresh database or an existing one).
+--
 -- Supabase schema: mirror + queue-calling coordination.
 --
 -- The local SQLite database (desktop app) remains the source of truth
@@ -424,57 +433,6 @@ $$;
 
 grant execute on function finish_first_review(text, date, integer) to anon;
 
--- "المناداة مرة أخرى" (call again) on /call: re-stamps called_at on the
--- ticket THIS counter currently has CALLED, without re-claiming or
--- changing anything else. /view's display page announces any ticket
--- whose called_at is newer than the last one it saw (see app/page.tsx),
--- so bumping this timestamp is all it takes to make the public screen
--- (and its speech announcement) replay the call — no new ticket is
--- claimed, no queue position changes. The 60-second cooldown and the
--- 2-recall cap are enforced client-side only (see components/
--- RecallButton.tsx) — this RPC itself just does the one thing safely,
--- same trust level as the rest of this file's anon-callable RPCs.
-create or replace function recall_ticket(
-    p_building text,
-    p_business_date date,
-    p_counter_number integer
-)
-returns table(out_ticket_number integer, out_called_at timestamptz)
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-    v_now timestamptz := now();
-    v_ticket_number integer;
-begin
-    update tickets t
-    set called_at = v_now,
-        updated_at = v_now
-    where t.uuid = (
-        select uuid from tickets
-        where building = p_building
-          and business_date = p_business_date
-          and counter_number = p_counter_number
-          and status = 'CALLED'
-        order by called_at desc
-        limit 1
-        for update skip locked
-    )
-    returning t.ticket_number into v_ticket_number;
-
-    if v_ticket_number is null then
-        return; -- nothing currently CALLED at this counter — no-op
-    end if;
-
-    out_ticket_number := v_ticket_number;
-    out_called_at := v_now;
-    return next;
-end;
-$$;
-
-grant execute on function recall_ticket(text, date, integer) to anon;
-
 -- ---------------------------------------------------------------------
 -- Stage 3: student affairs / admission calls the next student
 -- ---------------------------------------------------------------------
@@ -677,53 +635,6 @@ $$;
 
 grant execute on function admission_finish_review(text, date, text) to anon;
 
--- "المناداة مرة أخرى" on /admission — same idea as recall_ticket()
--- above, scoped to (building, p_desk) instead of counter_number:
--- re-stamps admission_called_at on whoever THIS desk currently has
--- CALLED_BY_ADMISSION, which is what /view's announcement logic keys
--- off for the student-affairs half of the display (see
--- announceAdmissionTicket in app/page.tsx). No claim, no status change.
-create or replace function admission_recall_ticket(
-    p_building text,
-    p_business_date date,
-    p_desk text
-)
-returns table(out_ticket_number integer, out_called_at timestamptz)
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-    v_now timestamptz := now();
-    v_ticket_number integer;
-begin
-    update tickets t
-    set admission_called_at = v_now,
-        updated_at = v_now
-    where t.uuid = (
-        select uuid from tickets
-        where building = p_building
-          and business_date = p_business_date
-          and admission_desk = p_desk
-          and status = 'CALLED_BY_ADMISSION'
-        order by admission_called_at desc
-        limit 1
-        for update skip locked
-    )
-    returning t.ticket_number into v_ticket_number;
-
-    if v_ticket_number is null then
-        return; -- nothing currently CALLED_BY_ADMISSION at this desk — no-op
-    end if;
-
-    out_ticket_number := v_ticket_number;
-    out_called_at := v_now;
-    return next;
-end;
-$$;
-
-grant execute on function admission_recall_ticket(text, date, text) to anon;
-
 -- Admin reset: wipes every ticket for a given (building, business_date)
 -- pair — used by the desktop app's PIN-gated "إعادة تعيين النظام"
 -- action to zero that building's sequence (e.g. after a rehearsal/
@@ -754,33 +665,6 @@ end;
 $$;
 
 grant execute on function admin_reset_business_date(text, date, text) to anon;
-
--- Free-tier usage check for /view's "استهلاك السيرفر" panel — lets
--- whoever manages the display screens see, without touching the
--- Supabase dashboard, whether this project is getting close to the
--- Free plan's limits (500MB database, ~200 concurrent Realtime
--- connections as of writing — see PLAN_MULTI_BUILDING.md/README for
--- where that's discussed). out_active_connections is EVERY connection
--- to this Postgres instance (PostgREST's pool, Realtime, etc. included,
--- not just "N employees online") — a rough load signal, not a precise
--- count of app users. SECURITY DEFINER is what makes pg_database_size
--- and pg_stat_activity readable through the anon key at all; neither
--- exposes ticket data, so this is safe to grant broadly like the rest
--- of this file's RPCs.
-create or replace function get_db_usage_stats()
-returns table(out_database_size_bytes bigint, out_active_connections integer)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-    out_database_size_bytes := pg_database_size(current_database());
-    select count(*) into out_active_connections from pg_stat_activity;
-    return next;
-end;
-$$;
-
-grant execute on function get_db_usage_stats() to anon;
 
 -- Enable Realtime for the public display page's live subscription
 -- (Database > Replication > supabase_realtime in the dashboard also
